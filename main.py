@@ -547,7 +547,7 @@ class GraphPaper(tk.Tk):
     def on_rotate_press(self, ev):
         """Handle R key press to rotate junction template."""
         if self.tool == 'junction' and self.selected_junction_type:
-            self.junction_rotation = (self.junction_rotation + 90) % 360
+            self.junction_rotation = (self.junction_rotation + 45) % 360
             print(f"Rotation: {self.junction_rotation}°")
             # Redraw preview with new rotation
             if self.junction_preview_pos:

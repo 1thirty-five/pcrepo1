@@ -13,10 +13,17 @@ class GraphPaper(tk.Tk):
         self.width = 960
         self.height = 600
 
-        self.tool = 'pen'  # pen, line, erase, move
-        self.shapes = []  # list of {'type':'line'/'poly', 'points':[(x,y)...], 'id': canvas_id}
+        self.tool = 'pen'  # pen, line, erase, move, junction
+        self.shapes = []  # list of {'type':'line'/'poly'/'junction', 'points':[(x,y)...], 'id': canvas_id, 'junction_type': ...}
         self.current = None
         self.selection = None
+        self.selected_junction_type = None  # stores the selected junction template
+        
+        # Junction preview state
+        self.junction_preview_ids = []  # canvas IDs for preview lines
+        self.junction_rotation = 0  # 0, 90, 180, 270 degrees
+        self.junction_flipped = False  # horizontal flip state
+        self.junction_preview_pos = None  # (x, y) in world coords
 
         self._dragging = False
         
@@ -30,6 +37,16 @@ class GraphPaper(tk.Tk):
         # toolbar state
         self.edit_roads_expanded = False
         self.view_expanded = False
+        self.monitor_expanded = False
+        self.config_expanded = False
+        self.junctions_expanded = False  # nested subcategory
+        
+        # editor mode states (for future logic/flags)
+        self.editor_mode = 'day'  # 'day' or 'night'
+        self.mode_states = {
+            'day': True,   # day mode is active by default
+            'night': False  # night mode is inactive by default
+        }
         
         # theme state (day/night mode)
         self.is_night_mode = False
@@ -85,6 +102,29 @@ class GraphPaper(tk.Tk):
         self.edit_roads_buttons.append(clear_btn)
         self.buttons.append(clear_btn)
         
+        # Junctions button (expands to show junction types)
+        junctions_btn = tk.Button(self.edit_roads_frame, text='Junctions ▼', command=self.toggle_junctions,
+                                 relief='flat', bd=0, padx=12, pady=6,
+                                 highlightthickness=0, borderwidth=0)
+        junctions_btn.pack(side='left', padx=2)
+        self.edit_roads_buttons.append(junctions_btn)
+        self.buttons.append(junctions_btn)
+        self.junctions_btn = junctions_btn
+        
+        # Junctions sub-buttons (initially hidden) - nested in edit_roads_frame
+        self.junctions_frame = tk.Frame(self.edit_roads_frame)
+        self.junctions_buttons = []
+        
+        junction_types = ['T-Section', 'Crossroads', 'X-Section', 'Y-Intersection', 'Roundabout', 'Ramp Merge']
+        for jtype in junction_types:
+            jb = tk.Button(self.junctions_frame, text=jtype, 
+                          command=lambda jt=jtype: self.select_junction(jt),
+                          relief='flat', bd=0, padx=12, pady=6,
+                          highlightthickness=0, borderwidth=0)
+            jb.pack(side='left', padx=2)
+            self.junctions_buttons.append(jb)
+            self.buttons.append(jb)
+        
         # View category button
         self.view_btn = tk.Button(self.toolbar, text='View', command=self.toggle_view,
                                   relief='flat', bd=0, padx=12, pady=6,
@@ -103,6 +143,30 @@ class GraphPaper(tk.Tk):
         self.view_buttons.append(grid_btn)
         self.buttons.append(grid_btn)
         
+        # Monitor category button
+        self.monitor_btn = tk.Button(self.toolbar, text='Monitor', command=self.toggle_monitor,
+                                     relief='flat', bd=0, padx=12, pady=6,
+                                     highlightthickness=0, borderwidth=0)
+        self.monitor_btn.pack(side='left', padx=4, pady=4)
+        self.buttons.append(self.monitor_btn)
+        
+        # Monitor sub-buttons (initially hidden)
+        self.monitor_frame = tk.Frame(self.toolbar)
+        self.monitor_buttons = []
+        # Add monitor buttons here later
+        
+        # Config category button
+        self.config_btn = tk.Button(self.toolbar, text='Config', command=self.toggle_config,
+                                    relief='flat', bd=0, padx=12, pady=6,
+                                    highlightthickness=0, borderwidth=0)
+        self.config_btn.pack(side='left', padx=4, pady=4)
+        self.buttons.append(self.config_btn)
+        
+        # Config sub-buttons (initially hidden)
+        self.config_frame = tk.Frame(self.toolbar)
+        self.config_buttons = []
+        # Add config buttons here later
+        
         # theme toggle button - placed on the right side
         self.theme_btn = tk.Button(self.toolbar, text='🌙', command=self.toggle_theme,
                                    relief='flat', bd=0, padx=12, pady=6,
@@ -115,6 +179,7 @@ class GraphPaper(tk.Tk):
         self.canvas.bind('<ButtonPress-1>', self.on_down)
         self.canvas.bind('<B1-Motion>', self.on_move)
         self.canvas.bind('<ButtonRelease-1>', self.on_up)
+        self.canvas.bind('<Motion>', self.on_mouse_motion)  # Track mouse for preview
         # pan with middle mouse or space+left
         self.canvas.bind('<ButtonPress-2>', self.on_pan_start)
         self.canvas.bind('<B2-Motion>', self.on_pan_move)
@@ -123,6 +188,13 @@ class GraphPaper(tk.Tk):
         self.canvas.bind('<MouseWheel>', self.on_zoom)
         self.canvas.bind('<Button-4>', self.on_zoom)  # Linux scroll up
         self.canvas.bind('<Button-5>', self.on_zoom)  # Linux scroll down
+        
+        # Keyboard bindings for junction manipulation
+        self.bind('<space>', self.on_space_press)
+        self.bind('<KeyPress-r>', self.on_rotate_press)
+        self.bind('<KeyPress-R>', self.on_rotate_press)
+        self.bind('<KeyPress-t>', self.on_flip_press)
+        self.bind('<KeyPress-T>', self.on_flip_press)
 
         # status
         self.status = ttk.Label(self, text='Tool: pen | Grid: %d' % self.grid_size)
@@ -137,15 +209,29 @@ class GraphPaper(tk.Tk):
         self.edit_roads_expanded = not self.edit_roads_expanded
         
         if self.edit_roads_expanded:
-            # Collapse View if it's open
+            # Collapse other categories if open
             if self.view_expanded:
                 self.view_expanded = False
                 self.view_frame.pack_forget()
+            if self.monitor_expanded:
+                self.monitor_expanded = False
+                self.monitor_frame.pack_forget()
+            if self.config_expanded:
+                self.config_expanded = False
+                self.config_frame.pack_forget()
+            # Hide other category buttons
+            self.view_btn.pack_forget()
+            self.monitor_btn.pack_forget()
+            self.config_btn.pack_forget()
             # Show Edit Roads buttons
-            self.edit_roads_frame.pack(side='left', padx=4, pady=4, after=self.edit_roads_btn)
+            self.edit_roads_frame.pack(side='left', padx=4, pady=4)
         else:
             # Hide Edit Roads buttons
             self.edit_roads_frame.pack_forget()
+            # Show all category buttons in order
+            self.view_btn.pack(side='left', padx=4, pady=4)
+            self.monitor_btn.pack(side='left', padx=4, pady=4)
+            self.config_btn.pack(side='left', padx=4, pady=4)
         
         self.apply_theme()
     
@@ -154,15 +240,91 @@ class GraphPaper(tk.Tk):
         self.view_expanded = not self.view_expanded
         
         if self.view_expanded:
-            # Collapse Edit Roads if it's open
+            # Collapse other categories if open
             if self.edit_roads_expanded:
                 self.edit_roads_expanded = False
                 self.edit_roads_frame.pack_forget()
+            if self.monitor_expanded:
+                self.monitor_expanded = False
+                self.monitor_frame.pack_forget()
+            if self.config_expanded:
+                self.config_expanded = False
+                self.config_frame.pack_forget()
+            # Hide other category buttons
+            self.edit_roads_btn.pack_forget()
+            self.monitor_btn.pack_forget()
+            self.config_btn.pack_forget()
             # Show View buttons
-            self.view_frame.pack(side='left', padx=4, pady=4, after=self.view_btn)
+            self.view_frame.pack(side='left', padx=4, pady=4)
         else:
             # Hide View buttons
             self.view_frame.pack_forget()
+            # Show all category buttons in order
+            self.edit_roads_btn.pack(side='left', padx=4, pady=4)
+            self.monitor_btn.pack(side='left', padx=4, pady=4)
+            self.config_btn.pack(side='left', padx=4, pady=4)
+        
+        self.apply_theme()
+    
+    def toggle_monitor(self):
+        """Toggle the Monitor submenu."""
+        self.monitor_expanded = not self.monitor_expanded
+        
+        if self.monitor_expanded:
+            # Collapse other categories if open
+            if self.edit_roads_expanded:
+                self.edit_roads_expanded = False
+                self.edit_roads_frame.pack_forget()
+            if self.view_expanded:
+                self.view_expanded = False
+                self.view_frame.pack_forget()
+            if self.config_expanded:
+                self.config_expanded = False
+                self.config_frame.pack_forget()
+            # Hide other category buttons
+            self.edit_roads_btn.pack_forget()
+            self.view_btn.pack_forget()
+            self.config_btn.pack_forget()
+            # Show Monitor buttons
+            self.monitor_frame.pack(side='left', padx=4, pady=4)
+        else:
+            # Hide Monitor buttons
+            self.monitor_frame.pack_forget()
+            # Show all category buttons in order
+            self.edit_roads_btn.pack(side='left', padx=4, pady=4)
+            self.view_btn.pack(side='left', padx=4, pady=4)
+            self.config_btn.pack(side='left', padx=4, pady=4)
+        
+        self.apply_theme()
+    
+    def toggle_config(self):
+        """Toggle the Config submenu."""
+        self.config_expanded = not self.config_expanded
+        
+        if self.config_expanded:
+            # Collapse other categories if open
+            if self.edit_roads_expanded:
+                self.edit_roads_expanded = False
+                self.edit_roads_frame.pack_forget()
+            if self.view_expanded:
+                self.view_expanded = False
+                self.view_frame.pack_forget()
+            if self.monitor_expanded:
+                self.monitor_expanded = False
+                self.monitor_frame.pack_forget()
+            # Hide other category buttons
+            self.edit_roads_btn.pack_forget()
+            self.view_btn.pack_forget()
+            self.monitor_btn.pack_forget()
+            # Show Config buttons
+            self.config_frame.pack(side='left', padx=4, pady=4)
+        else:
+            # Hide Config buttons
+            self.config_frame.pack_forget()
+            # Show all category buttons in order
+            self.edit_roads_btn.pack(side='left', padx=4, pady=4)
+            self.view_btn.pack(side='left', padx=4, pady=4)
+            self.monitor_btn.pack(side='left', padx=4, pady=4)
         
         self.apply_theme()
     
@@ -190,6 +352,9 @@ class GraphPaper(tk.Tk):
         # Update sub-menu frames background
         self.edit_roads_frame.config(bg=toolbar_bg)
         self.view_frame.config(bg=toolbar_bg)
+        self.monitor_frame.config(bg=toolbar_bg)
+        self.config_frame.config(bg=toolbar_bg)
+        self.junctions_frame.config(bg=toolbar_bg)  # nested frame
         
         # Update all buttons
         for btn in self.buttons:
@@ -206,10 +371,16 @@ class GraphPaper(tk.Tk):
         """Toggle between day and night mode."""
         self.is_night_mode = not self.is_night_mode
         
-        # update button symbol
+        # Update editor mode states
         if self.is_night_mode:
+            self.editor_mode = 'night'
+            self.mode_states['day'] = False
+            self.mode_states['night'] = True
             self.theme_btn.config(text='☀️')
         else:
+            self.editor_mode = 'day'
+            self.mode_states['day'] = True
+            self.mode_states['night'] = False
             self.theme_btn.config(text='🌙')
         
         # apply new theme to entire UI
@@ -230,6 +401,254 @@ class GraphPaper(tk.Tk):
                 except Exception:
                     pass
         self.shapes.clear()
+    
+    def open_junctions(self):
+        """Open junctions submenu/dialog - placeholder for future functionality."""
+        # Placeholder for junctions functionality
+        print("Junctions feature - to be implemented")
+        pass
+    
+    def toggle_junctions(self):
+        """Toggle the Junctions nested submenu."""
+        self.junctions_expanded = not self.junctions_expanded
+        
+        if self.junctions_expanded:
+            # Change button text to show it's expanded
+            self.junctions_btn.config(text='Junctions ▲')
+            # Hide other Edit Roads buttons (pen, line, erase, move, clear)
+            for btn in self.edit_roads_buttons:
+                if btn != self.junctions_btn:  # Don't hide the junctions button itself
+                    btn.pack_forget()
+            # Show junctions sub-buttons
+            self.junctions_frame.pack(side='left', padx=4, pady=4)
+        else:
+            # Change button text back
+            self.junctions_btn.config(text='Junctions ▼')
+            # Hide junctions sub-buttons
+            self.junctions_frame.pack_forget()
+            # Show other Edit Roads buttons again
+            for btn in self.edit_roads_buttons:
+                if btn != self.junctions_btn:
+                    btn.pack(side='left', padx=2)
+        
+        self.apply_theme()
+    
+    def select_junction(self, junction_type):
+        """Handle selection of a specific junction type."""
+        self.selected_junction_type = junction_type
+        self.tool = 'junction'
+        self.junction_rotation = 0  # Reset rotation
+        self.junction_flipped = False  # Reset flip
+        self.clear_junction_preview()  # Clear any existing preview
+        print(f"Selected junction type: {junction_type}")
+        self.status.config(text=f'Tool: Place {junction_type} | Grid: %d | R: Rotate | T: Flip | Space: Place' % self.grid_size)
+    
+    def rotate_point(self, x, y, cx, cy, degrees):
+        """Rotate point (x, y) around center (cx, cy) by given degrees."""
+        rad = math.radians(degrees)
+        cos_a = math.cos(rad)
+        sin_a = math.sin(rad)
+        
+        # Translate to origin
+        dx = x - cx
+        dy = y - cy
+        
+        # Rotate
+        new_x = dx * cos_a - dy * sin_a
+        new_y = dx * sin_a + dy * cos_a
+        
+        # Translate back
+        return (new_x + cx, new_y + cy)
+    
+    def flip_point(self, x, y, cx):
+        """Flip point (x, y) horizontally around center x coordinate cx."""
+        return (2 * cx - x, y)
+    
+    def transform_template(self, template_lines, center_x, center_y):
+        """Apply rotation and flip transformations to template lines."""
+        transformed = []
+        
+        for line_points in template_lines:
+            transformed_line = []
+            for x, y in line_points:
+                # Apply rotation
+                if self.junction_rotation != 0:
+                    x, y = self.rotate_point(x, y, center_x, center_y, self.junction_rotation)
+                
+                # Apply flip
+                if self.junction_flipped:
+                    x, y = self.flip_point(x, y, center_x)
+                
+                transformed_line.append((x, y))
+            
+            transformed.append(transformed_line)
+        
+        return transformed
+    
+    def clear_junction_preview(self):
+        """Clear the junction preview from canvas."""
+        for cid in self.junction_preview_ids:
+            try:
+                self.canvas.delete(cid)
+            except:
+                pass
+        self.junction_preview_ids.clear()
+    
+    def draw_junction_preview(self, x, y):
+        """Draw translucent preview of junction at position."""
+        if not self.selected_junction_type:
+            return
+        
+        # Clear previous preview
+        self.clear_junction_preview()
+        
+        # Snap to grid
+        x, y = self.snap(x, y)
+        self.junction_preview_pos = (x, y)
+        
+        # Get template and transform it
+        template_lines = self.get_junction_template(self.selected_junction_type, x, y)
+        template_lines = self.transform_template(template_lines, x, y)
+        
+        # Get current theme for line color
+        theme = self.theme['night'] if self.is_night_mode else self.theme['day']
+        
+        # Draw each line in the template with transparency
+        for line_points in template_lines:
+            pts_screen = [self.world_to_screen(px, py) for px, py in line_points]
+            flat_pts = []
+            for px, py in pts_screen:
+                flat_pts.extend((px, py))
+            
+            # Draw with stipple pattern for translucency effect
+            cid = self.canvas.create_line(*flat_pts, fill=theme['line'], width=2, 
+                                          dash=(4, 4), stipple='gray50')
+            self.junction_preview_ids.append(cid)
+    
+    def on_mouse_motion(self, ev):
+        """Handle mouse motion for junction preview."""
+        if self.tool == 'junction' and self.selected_junction_type:
+            wx, wy = self.screen_to_world(ev.x, ev.y)
+            self.draw_junction_preview(wx, wy)
+    
+    def on_space_press(self, ev):
+        """Handle space bar press to place junction."""
+        if self.tool == 'junction' and self.junction_preview_pos:
+            x, y = self.junction_preview_pos
+            self.place_junction(x, y)
+            self.clear_junction_preview()
+            # Switch back to pen mode
+            self.selected_junction_type = None
+            self.junction_preview_pos = None
+            self.junction_rotation = 0
+            self.junction_flipped = False
+            self.set_tool('pen')
+    
+    def on_rotate_press(self, ev):
+        """Handle R key press to rotate junction template."""
+        if self.tool == 'junction' and self.selected_junction_type:
+            self.junction_rotation = (self.junction_rotation + 90) % 360
+            print(f"Rotation: {self.junction_rotation}°")
+            # Redraw preview with new rotation
+            if self.junction_preview_pos:
+                self.draw_junction_preview(*self.junction_preview_pos)
+    
+    def on_flip_press(self, ev):
+        """Handle T key press to flip junction template."""
+        if self.tool == 'junction' and self.selected_junction_type:
+            self.junction_flipped = not self.junction_flipped
+            print(f"Flipped: {self.junction_flipped}")
+            # Redraw preview with new flip state
+            if self.junction_preview_pos:
+                self.draw_junction_preview(*self.junction_preview_pos)
+    
+    def get_junction_template(self, junction_type, center_x, center_y):
+        """Return the template points for a junction type centered at (center_x, center_y)."""
+        g = self.grid_size
+        templates = {
+            'T-Section': [
+                # Horizontal road (1 grid unit each side from center)
+                [(center_x - g, center_y), (center_x, center_y)],
+                [(center_x, center_y), (center_x + g, center_y)],
+                # Vertical road (1 grid unit up from center)
+                [(center_x, center_y), (center_x, center_y - g)]
+            ],
+            'Crossroads': [
+                # Horizontal road (1 grid unit each side)
+                [(center_x - g, center_y), (center_x, center_y)],
+                [(center_x, center_y), (center_x + g, center_y)],
+                # Vertical road (1 grid unit up and down)
+                [(center_x, center_y - g), (center_x, center_y)],
+                [(center_x, center_y), (center_x, center_y + g)]
+            ],
+            'X-Section': [
+                # Diagonal road (top-left to center, 1 grid unit)
+                [(center_x - g, center_y - g), (center_x, center_y)],
+                # Diagonal road (center to bottom-right, 1 grid unit)
+                [(center_x, center_y), (center_x + g, center_y + g)],
+                # Diagonal road (top-right to center, 1 grid unit)
+                [(center_x + g, center_y - g), (center_x, center_y)],
+                # Diagonal road (center to bottom-left, 1 grid unit)
+                [(center_x, center_y), (center_x - g, center_y + g)]
+            ],
+            'Y-Intersection': [
+                # Bottom vertical road (1 grid unit)
+                [(center_x, center_y + g), (center_x, center_y)],
+                # Top-left diagonal (1 grid unit)
+                [(center_x, center_y), (center_x - g, center_y - g)],
+                # Top-right diagonal (1 grid unit)
+                [(center_x, center_y), (center_x + g, center_y - g)]
+            ],
+            'Roundabout': [
+                # Create an octagon with 2 grid unit radius
+                # Using 8 segments at 45-degree intervals
+                [(center_x + 2*g * math.cos(math.radians(i * 45)), 
+                  center_y + 2*g * math.sin(math.radians(i * 45))),
+                 (center_x + 2*g * math.cos(math.radians((i + 1) * 45)), 
+                  center_y + 2*g * math.sin(math.radians((i + 1) * 45)))]
+                for i in range(8)
+            ],
+            'Ramp Merge': [
+                # Main highway (1 grid unit each side)
+                [(center_x - g, center_y), (center_x, center_y)],
+                [(center_x, center_y), (center_x + g, center_y)],
+                # Merge ramp (1 grid unit diagonal approach)
+                [(center_x - g, center_y + g), (center_x, center_y)]
+            ]
+        }
+        return templates.get(junction_type, [])
+    
+    def place_junction(self, x, y):
+        """Place a junction template at the given coordinates."""
+        if not self.selected_junction_type:
+            return
+        
+        # Snap to grid
+        x, y = self.snap(x, y)
+        
+        # Get template for this junction type and apply transformations
+        template_lines = self.get_junction_template(self.selected_junction_type, x, y)
+        template_lines = self.transform_template(template_lines, x, y)
+        
+        # Get current theme for line color
+        theme = self.theme['night'] if self.is_night_mode else self.theme['day']
+        
+        # Draw each line in the template
+        for line_points in template_lines:
+            # Convert world coords to screen coords
+            pts_screen = [self.world_to_screen(px, py) for px, py in line_points]
+            cid = self.canvas.create_line(*self.flatten(pts_screen), fill=theme['line'], width=2)
+            
+            # Store as a shape with junction metadata
+            shape = {
+                'type': 'junction',
+                'junction_type': self.selected_junction_type,
+                'points': line_points,
+                'id': cid
+            }
+            self.shapes.append(shape)
+        
+        print(f"Placed {self.selected_junction_type} at ({x}, {y})")
 
     def export_coords(self):
         out = []
@@ -313,7 +732,13 @@ class GraphPaper(tk.Tk):
         x, y = self.snap(wx, wy)
         self._dragging = True
 
-        if self.tool == 'pen':
+        if self.tool == 'junction':
+            # Junction mode - preview only, placement happens with space bar
+            # Don't place on click, just update preview position
+            self._dragging = False
+            return
+
+        elif self.tool == 'pen':
             # start with two identical points so create_line receives 4 coords
             pts = [(x, y), (x, y)]
             pts_screen = [self.world_to_screen(px, py) for px, py in pts]

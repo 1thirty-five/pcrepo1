@@ -5,6 +5,171 @@ import math
 DEFAULT_GRID = 32
 
 
+class RoadConfigDialog(tk.Toplevel):
+    """Dialog to configure road properties."""
+    def __init__(self, parent, shape_type):
+        super().__init__(parent)
+        self.title('Road Configuration')
+        self.result = None
+        self.shape_type = shape_type
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center dialog
+        self.geometry('350x300')
+        
+        # Road type selection
+        tk.Label(self, text='Road Type:', font=('Arial', 12, 'bold')).pack(pady=(10, 5))
+        self.road_type_var = tk.StringVar(value='two_way')
+        
+        tk.Radiobutton(self, text='Two-Way Road', variable=self.road_type_var, 
+                      value='two_way', command=self.update_direction_options).pack(anchor='w', padx=20)
+        tk.Radiobutton(self, text='One-Way Road', variable=self.road_type_var, 
+                      value='one_way', command=self.update_direction_options).pack(anchor='w', padx=20)
+        
+        # Direction frame
+        self.direction_frame = tk.Frame(self)
+        self.direction_frame.pack(pady=10, fill='both', expand=True)
+        
+        tk.Label(self.direction_frame, text='Traffic Direction:', font=('Arial', 11, 'bold')).pack(pady=(5, 5))
+        
+        # Direction options
+        self.directions = ['North', 'South', 'East', 'West', 'North-East', 'North-West', 'South-East', 'South-West']
+        self.direction1_var = tk.StringVar(value='North')
+        self.direction2_var = tk.StringVar(value='South')
+        
+        # Frame for first direction
+        self.dir1_frame = tk.Frame(self.direction_frame)
+        self.dir1_frame.pack(pady=5)
+        tk.Label(self.dir1_frame, text='Direction 1:').pack(side='left', padx=5)
+        self.dir1_combo = ttk.Combobox(self.dir1_frame, textvariable=self.direction1_var, 
+                                       values=self.directions, state='readonly', width=12)
+        self.dir1_combo.pack(side='left', padx=5)
+        
+        # Frame for second direction (for two-way roads)
+        self.dir2_frame = tk.Frame(self.direction_frame)
+        self.dir2_frame.pack(pady=5)
+        tk.Label(self.dir2_frame, text='Direction 2:').pack(side='left', padx=5)
+        self.dir2_combo = ttk.Combobox(self.dir2_frame, textvariable=self.direction2_var, 
+                                       values=self.directions, state='readonly', width=12)
+        self.dir2_combo.pack(side='left', padx=5)
+        
+        # Buttons
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=10)
+        tk.Button(btn_frame, text='OK', command=self.ok_clicked, width=10).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Cancel', command=self.cancel_clicked, width=10).pack(side='left', padx=5)
+        
+        self.update_direction_options()
+        
+        # Wait for dialog to close
+        self.wait_window()
+    
+    def update_direction_options(self):
+        """Show/hide second direction based on road type."""
+        if self.road_type_var.get() == 'two_way':
+            self.dir2_frame.pack(pady=5)
+        else:
+            self.dir2_frame.pack_forget()
+    
+    def ok_clicked(self):
+        """Store result and close dialog."""
+        road_type = self.road_type_var.get()
+        dir1 = self.direction1_var.get()
+        
+        if road_type == 'two_way':
+            dir2 = self.direction2_var.get()
+            self.result = {
+                'road_type': 'two_way',
+                'directions': [dir1, dir2]
+            }
+        else:
+            self.result = {
+                'road_type': 'one_way',
+                'directions': [dir1]
+            }
+        
+        self.destroy()
+    
+    def cancel_clicked(self):
+        """Close dialog without saving."""
+        self.result = None
+        self.destroy()
+
+
+class TrafficLightTimingDialog(tk.Toplevel):
+    """Dialog to configure traffic light timing."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title('Traffic Light Timing Configuration')
+        self.result = None
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center dialog
+        self.geometry('350x250')
+        
+        tk.Label(self, text='Set duration for each light color:', 
+                font=('Arial', 12, 'bold')).pack(pady=(10, 15))
+        
+        # Green light duration
+        green_frame = tk.Frame(self)
+        green_frame.pack(pady=5)
+        tk.Label(green_frame, text='Green Light Duration (seconds):', width=25, anchor='w').pack(side='left', padx=10)
+        self.green_var = tk.StringVar(value='3')
+        tk.Spinbox(green_frame, from_=1, to=30, textvariable=self.green_var, width=10).pack(side='left')
+        
+        # Yellow light duration
+        yellow_frame = tk.Frame(self)
+        yellow_frame.pack(pady=5)
+        tk.Label(yellow_frame, text='Yellow Light Duration (seconds):', width=25, anchor='w').pack(side='left', padx=10)
+        self.yellow_var = tk.StringVar(value='2')
+        tk.Spinbox(yellow_frame, from_=1, to=30, textvariable=self.yellow_var, width=10).pack(side='left')
+        
+        # Red light duration
+        red_frame = tk.Frame(self)
+        red_frame.pack(pady=5)
+        tk.Label(red_frame, text='Red Light Duration (seconds):', width=25, anchor='w').pack(side='left', padx=10)
+        self.red_var = tk.StringVar(value='3')
+        tk.Spinbox(red_frame, from_=1, to=30, textvariable=self.red_var, width=10).pack(side='left')
+        
+        # Buttons
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=20)
+        tk.Button(btn_frame, text='OK', command=self.ok_clicked, width=10).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Cancel', command=self.cancel_clicked, width=10).pack(side='left', padx=5)
+        
+        # Wait for dialog to close
+        self.wait_window()
+    
+    def ok_clicked(self):
+        """Store result and close dialog."""
+        try:
+            green = int(self.green_var.get())
+            yellow = int(self.yellow_var.get())
+            red = int(self.red_var.get())
+            
+            self.result = {
+                'green': green,
+                'yellow': yellow,
+                'red': red
+            }
+        except ValueError:
+            # Use defaults if invalid input
+            self.result = {'green': 3, 'yellow': 2, 'red': 3}
+        
+        self.destroy()
+    
+    def cancel_clicked(self):
+        """Close dialog without saving."""
+        self.result = None
+        self.destroy()
+
+
 class GraphPaper(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -13,11 +178,20 @@ class GraphPaper(tk.Tk):
         self.width = 960
         self.height = 600
 
-        self.tool = 'pen'  # pen, line, erase, move, junction
-        self.shapes = []  # list of {'type':'line'/'poly'/'junction', 'points':[(x,y)...], 'id': canvas_id, 'junction_type': ...}
+        self.tool = 'pen'  # pen, line, erase, move, junction, traffic_light, ped_crossing
+        self.shapes = []  # list of {'type':'line'/'poly'/'junction', 'points':[(x,y)...], 'id': canvas_id, 'junction_type': ..., 'traffic_light': ..., 'ped_crossing': ...}
         self.current = None
         self.selection = None
         self.selected_junction_type = None  # stores the selected junction template
+        
+        # Config tool state
+        self.config_tool = None  # 'traffic_light' or 'ped_crossing'
+        self.node_markers = {}  # dict to store traffic light and crossing markers by shape/point
+        
+        # Traffic light animation state
+        self.traffic_light_states = {}  # {unique_id: {'state': 'green'/'yellow'/'red', 'state_index': int, 'timing': {...}, 'marker_key': ...}}
+        self.traffic_light_colors = ['green', 'yellow', 'red']
+        self.traffic_light_next_id = 0  # Counter for unique traffic light IDs
         
         # Junction preview state
         self.junction_preview_ids = []  # canvas IDs for preview lines
@@ -115,7 +289,7 @@ class GraphPaper(tk.Tk):
         self.junctions_frame = tk.Frame(self.edit_roads_frame)
         self.junctions_buttons = []
         
-        junction_types = ['T-Section', 'Crossroads', 'X-Section', 'Y-Intersection', 'Roundabout', 'Ramp Merge']
+        junction_types = ['T-Section', 'Crossroads', 'Y-Intersection', 'Roundabout', 'Ramp Merge']
         for jtype in junction_types:
             jb = tk.Button(self.junctions_frame, text=jtype, 
                           command=lambda jt=jtype: self.select_junction(jt),
@@ -165,7 +339,24 @@ class GraphPaper(tk.Tk):
         # Config sub-buttons (initially hidden)
         self.config_frame = tk.Frame(self.toolbar)
         self.config_buttons = []
-        # Add config buttons here later
+        
+        # Add traffic light button
+        traffic_light_btn = tk.Button(self.config_frame, text='Traffic Light', 
+                                      command=lambda: self.set_config_tool('traffic_light'),
+                                      relief='flat', bd=0, padx=12, pady=6,
+                                      highlightthickness=0, borderwidth=0)
+        traffic_light_btn.pack(side='left', padx=2)
+        self.config_buttons.append(traffic_light_btn)
+        self.buttons.append(traffic_light_btn)
+        
+        # Add pedestrian crossing button
+        ped_crossing_btn = tk.Button(self.config_frame, text='Pedestrian Crossing', 
+                                     command=lambda: self.set_config_tool('ped_crossing'),
+                                     relief='flat', bd=0, padx=12, pady=6,
+                                     highlightthickness=0, borderwidth=0)
+        ped_crossing_btn.pack(side='left', padx=2)
+        self.config_buttons.append(ped_crossing_btn)
+        self.buttons.append(ped_crossing_btn)
         
         # theme toggle button - placed on the right side
         self.theme_btn = tk.Button(self.toolbar, text='🌙', command=self.toggle_theme,
@@ -203,6 +394,15 @@ class GraphPaper(tk.Tk):
     def set_tool(self, t):
         self.tool = t
         self.status.config(text='Tool: %s | Grid: %d' % (self.tool, self.grid_size))
+    
+    def set_config_tool(self, config_type):
+        """Set the configuration tool (traffic light or pedestrian crossing)."""
+        self.config_tool = config_type
+        self.tool = config_type
+        if config_type == 'traffic_light':
+            self.status.config(text='Tool: Add Traffic Light (click on junction/intersection) | Grid: %d' % self.grid_size)
+        elif config_type == 'ped_crossing':
+            self.status.config(text='Tool: Add Pedestrian Crossing (click on road) | Grid: %d' % self.grid_size)
     
     def toggle_edit_roads(self):
         """Toggle the Edit Roads submenu."""
@@ -394,6 +594,7 @@ class GraphPaper(tk.Tk):
             self.draw_grid()
 
     def clear(self):
+        # Clear all shapes
         for s in list(self.shapes):
             if 'id' in s and s['id']:
                 try:
@@ -401,6 +602,13 @@ class GraphPaper(tk.Tk):
                 except Exception:
                     pass
         self.shapes.clear()
+        
+        # Clear all markers (traffic lights and pedestrian crossings)
+        self.canvas.delete('marker')
+        self.node_markers.clear()
+        self.traffic_light_states.clear()
+        
+        print("All structures cleared")
     
     def open_junctions(self):
         """Open junctions submenu/dialog - placeholder for future functionality."""
@@ -432,6 +640,309 @@ class GraphPaper(tk.Tk):
                     btn.pack(side='left', padx=2)
         
         self.apply_theme()
+    
+    def add_traffic_light(self, x, y):
+        """Add a traffic light marker at the nearest junction/intersection point."""
+        # Find nearest point from any shape
+        min_dist = float('inf')
+        nearest_point = None
+        nearest_shape = None
+        
+        thresh = self.grid_size * 1.5
+        for shape in self.shapes:
+            for px, py in shape['points']:
+                dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+                if dist < min_dist and dist < thresh:
+                    min_dist = dist
+                    nearest_point = (px, py)
+                    nearest_shape = shape
+        
+        if nearest_point:
+            marker_key = (nearest_shape.get('id'), nearest_point)
+            
+            # Check if this is a two-way road
+            road_config = nearest_shape.get('road_config', {})
+            is_two_way = road_config.get('road_type') == 'two_way'
+            
+            # Count existing traffic lights at this point
+            if marker_key not in self.node_markers:
+                self.node_markers[marker_key] = {}
+            
+            existing_lights = [k for k in self.node_markers[marker_key].keys() if k.startswith('traffic_light_')]
+            
+            # Check if we can add another light
+            if is_two_way and len(existing_lights) >= 2:
+                print(f"Two-way road already has 2 traffic lights at {nearest_point}")
+                return
+            elif not is_two_way and len(existing_lights) >= 1:
+                print(f"One-way road already has 1 traffic light at {nearest_point}")
+                return
+            
+            # Show timing configuration dialog
+            timing_dialog = TrafficLightTimingDialog(self)
+            
+            if not timing_dialog.result:
+                print("Traffic light placement cancelled")
+                return
+            
+            timing = timing_dialog.result
+            
+            # Calculate perpendicular offset based on road direction
+            # Find the line segment this point belongs to
+            point_idx = None
+            for i, (px, py) in enumerate(nearest_shape['points']):
+                if (px, py) == nearest_point:
+                    point_idx = i
+                    break
+            
+            # Calculate perpendicular direction
+            perpendicular_offset_x = 0
+            perpendicular_offset_y = 15  # Default offset distance from node
+            
+            if point_idx is not None and len(nearest_shape['points']) > 1:
+                # Get adjacent points to determine road direction
+                if point_idx > 0:
+                    # Use previous point
+                    prev_x, prev_y = nearest_shape['points'][point_idx - 1]
+                    dx = nearest_point[0] - prev_x
+                    dy = nearest_point[1] - prev_y
+                elif point_idx < len(nearest_shape['points']) - 1:
+                    # Use next point
+                    next_x, next_y = nearest_shape['points'][point_idx + 1]
+                    dx = next_x - nearest_point[0]
+                    dy = next_y - nearest_point[1]
+                else:
+                    dx, dy = 0, 1  # Default vertical
+                
+                # Calculate perpendicular direction (rotate 90 degrees)
+                # Normalize and scale
+                length = math.sqrt(dx * dx + dy * dy)
+                if length > 0:
+                    dx, dy = dx / length, dy / length
+                    # Perpendicular vector (rotate 90 degrees counterclockwise)
+                    perpendicular_offset_x = -dy * 15
+                    perpendicular_offset_y = dx * 15
+            
+            # Calculate offset for second light on two-way roads (opposite side)
+            if len(existing_lights) == 1:
+                perpendicular_offset_x = -perpendicular_offset_x
+                perpendicular_offset_y = -perpendicular_offset_y
+            
+            # Draw traffic light as filled circle with border
+            sx, sy = self.world_to_screen(*nearest_point)
+            sx += perpendicular_offset_x
+            sy += perpendicular_offset_y
+            
+            # Draw outer circle (border) - larger circle in black
+            border_id = self.canvas.create_oval(sx - 10, sy - 10, sx + 10, sy + 10, 
+                                               fill='black', outline='black', width=2, tags='marker')
+            
+            # Draw inner light (starts with green)
+            light_id = self.canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, 
+                                              fill='green', outline='', tags='marker')
+            
+            # Generate unique ID for this traffic light
+            light_unique_id = self.traffic_light_next_id
+            self.traffic_light_next_id += 1
+            
+            # Store marker info with unique key
+            light_key = f'traffic_light_{len(existing_lights)}'
+            self.node_markers[marker_key][light_key] = {
+                'border_id': border_id,
+                'light_id': light_id,
+                'world_pos': nearest_point,
+                'current_color': 'green',
+                'perpendicular_offset': (perpendicular_offset_x, perpendicular_offset_y),
+                'unique_id': light_unique_id
+            }
+            
+            # Initialize traffic light state with timing
+            self.traffic_light_states[light_unique_id] = {
+                'state': 'green',
+                'state_index': 0,
+                'timing': timing,
+                'marker_key': marker_key,
+                'light_key': light_key,
+                'last_change': 0
+            }
+            
+            print(f"Traffic light {len(existing_lights) + 1} added at {nearest_point} with timing: {timing}")
+            
+            # Start animation if this is the first traffic light
+            if len(self.traffic_light_states) == 1:
+                self.animate_traffic_lights()
+    
+    def add_pedestrian_crossing(self, x, y):
+        """Add a pedestrian crossing marker on the nearest road node with traffic lights."""
+        # Find nearest point from any shape
+        min_dist = float('inf')
+        nearest_point = None
+        nearest_shape = None
+        
+        thresh = self.grid_size * 1.5
+        for shape in self.shapes:
+            for px, py in shape['points']:
+                dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+                if dist < min_dist and dist < thresh:
+                    min_dist = dist
+                    nearest_point = (px, py)
+                    nearest_shape = shape
+        
+        if nearest_point:
+            marker_key = (nearest_shape.get('id'), nearest_point)
+            
+            # Check if this node has traffic lights
+            if marker_key not in self.node_markers:
+                print(f"No traffic lights at this node. Pedestrian crossings can only be placed at nodes with traffic lights.")
+                return
+            
+            # Check if there are any traffic lights at this node
+            has_traffic_light = any(k.startswith('traffic_light_') for k in self.node_markers[marker_key].keys())
+            
+            if not has_traffic_light:
+                print(f"No traffic lights at this node. Pedestrian crossings can only be placed at nodes with traffic lights.")
+                return
+            
+            # Check if pedestrian crossing already exists at this point
+            if 'ped_crossing' in self.node_markers[marker_key]:
+                print(f"Pedestrian crossing already exists at {nearest_point}")
+                return
+            
+            # Position pedestrian crossing below the traffic lights to avoid obstruction
+            sx, sy = self.world_to_screen(*nearest_point)
+            ped_offset_y = 25  # Place 25 pixels below the node
+            
+            # Draw pedestrian crossing housing (white rectangle with stripes)
+            housing_id = self.canvas.create_rectangle(sx - 10, sy + ped_offset_y - 6, 
+                                                     sx + 10, sy + ped_offset_y + 6, 
+                                                     fill='white', outline='black', width=2, 
+                                                     tags='marker')
+            
+            # Draw pedestrian light indicator (starts with red since traffic lights start green)
+            ped_light_id = self.canvas.create_oval(sx - 4, sy + ped_offset_y - 3, 
+                                                  sx + 4, sy + ped_offset_y + 3, 
+                                                  fill='red', outline='', tags='marker')
+            
+            # Store marker info
+            self.node_markers[marker_key]['ped_crossing'] = {
+                'housing_id': housing_id,
+                'light_id': ped_light_id,
+                'world_pos': nearest_point,
+                'current_color': 'red',
+                'offset_y': ped_offset_y  # Store offset for redrawing
+            }
+            
+            print(f"Pedestrian crossing added at {nearest_point} (below traffic lights)")
+
+    
+    def animate_traffic_lights(self):
+        """Animate all traffic lights by cycling through colors with individual timing."""
+        import time
+        current_time = time.time()
+        
+        if self.traffic_light_states:
+            # In night mode, set all lights to constant yellow
+            if self.is_night_mode:
+                for light_id, state in list(self.traffic_light_states.items()):
+                    marker_key = state['marker_key']
+                    light_key = state['light_key']
+                    
+                    if marker_key in self.node_markers and light_key in self.node_markers[marker_key]:
+                        light_id_canvas = self.node_markers[marker_key][light_key]['light_id']
+                        current_color = self.node_markers[marker_key][light_key]['current_color']
+                        
+                        # Only update if not already yellow
+                        if current_color != 'yellow':
+                            self.canvas.itemconfig(light_id_canvas, fill='yellow')
+                            self.node_markers[marker_key][light_key]['current_color'] = 'yellow'
+            else:
+                # Normal day mode - cycle through colors with timing
+                # Group lights by junction and phase for coordination
+                junction_phases = {}
+                
+                for light_id, state in list(self.traffic_light_states.items()):
+                    # Check if this is a coordinated junction light
+                    if 'phase' in state and 'junction_type' in state:
+                        junction_key = state.get('marker_key', None)
+                        phase = state['phase']
+                        
+                        # Group by junction and phase
+                        if junction_key not in junction_phases:
+                            junction_phases[junction_key] = {}
+                        if phase not in junction_phases[junction_key]:
+                            junction_phases[junction_key][phase] = []
+                        junction_phases[junction_key][phase].append(light_id)
+                    
+                    # Get timing for current color
+                    timing = state['timing']
+                    current_color = state['state']
+                    duration = timing[current_color]  # Duration in seconds
+                    
+                    # Check if enough time has passed
+                    elapsed = current_time - state['last_change']
+                    if elapsed >= duration:
+                        # For coordinated junction lights, calculate phase-based timing
+                        if 'phase' in state:
+                            # Determine next color based on phase coordination
+                            # Phase cycle: Green -> Yellow -> Red -> Green
+                            if current_color == 'green':
+                                new_color = 'yellow'
+                                new_index = 1
+                            elif current_color == 'yellow':
+                                new_color = 'red'
+                                new_index = 2
+                            else:  # red
+                                new_color = 'green'
+                                new_index = 0
+                        else:
+                            # Regular cycling for non-coordinated lights
+                            state['state_index'] = (state['state_index'] + 1) % 3
+                            new_color = self.traffic_light_colors[state['state_index']]
+                            new_index = state['state_index']
+                        
+                        state['state'] = new_color
+                        state['state_index'] = new_index
+                        state['last_change'] = current_time
+                        
+                        # Update the traffic light color on canvas
+                        marker_key = state['marker_key']
+                        light_key = state['light_key']
+                        
+                        if marker_key in self.node_markers and light_key in self.node_markers[marker_key]:
+                            light_id_canvas = self.node_markers[marker_key][light_key]['light_id']
+                            self.canvas.itemconfig(light_id_canvas, fill=new_color)
+                            self.node_markers[marker_key][light_key]['current_color'] = new_color
+        
+        # Update all pedestrian crossings with inverse logic
+        # When traffic light is green or yellow, pedestrian is red
+        # When traffic light is red, pedestrian is green
+        # In night mode, all pedestrian lights are yellow
+        for marker_key, markers in self.node_markers.items():
+            if 'ped_crossing' in markers:
+                if self.is_night_mode:
+                    # Night mode - constant yellow
+                    ped_color = 'yellow'
+                else:
+                    # Day mode - inverse logic
+                    ped_color = 'green'  # Default
+                    
+                    # Check if any traffic light is green or yellow
+                    for tl_id, tl_state in self.traffic_light_states.items():
+                        if tl_state['state'] in ['green', 'yellow']:
+                            ped_color = 'red'
+                            break
+                        elif tl_state['state'] == 'red':
+                            ped_color = 'green'
+                
+                # Update pedestrian light color
+                ped_light_id = markers['ped_crossing']['light_id']
+                current_ped_color = markers['ped_crossing'].get('current_color', '')
+                if current_ped_color != ped_color:
+                    self.canvas.itemconfig(ped_light_id, fill=ped_color)
+                    markers['ped_crossing']['current_color'] = ped_color
+        
+        # Schedule next update (check every 100ms for smoother timing)
+        self.after(100, self.animate_traffic_lights)
     
     def select_junction(self, junction_type):
         """Handle selection of a specific junction type."""
@@ -581,16 +1092,6 @@ class GraphPaper(tk.Tk):
                 [(center_x, center_y - g), (center_x, center_y)],
                 [(center_x, center_y), (center_x, center_y + g)]
             ],
-            'X-Section': [
-                # Diagonal road (top-left to center, 1 grid unit)
-                [(center_x - g, center_y - g), (center_x, center_y)],
-                # Diagonal road (center to bottom-right, 1 grid unit)
-                [(center_x, center_y), (center_x + g, center_y + g)],
-                # Diagonal road (top-right to center, 1 grid unit)
-                [(center_x + g, center_y - g), (center_x, center_y)],
-                # Diagonal road (center to bottom-left, 1 grid unit)
-                [(center_x, center_y), (center_x - g, center_y + g)]
-            ],
             'Y-Intersection': [
                 # Bottom vertical road (1 grid unit)
                 [(center_x, center_y + g), (center_x, center_y)],
@@ -633,22 +1134,160 @@ class GraphPaper(tk.Tk):
         # Get current theme for line color
         theme = self.theme['night'] if self.is_night_mode else self.theme['day']
         
-        # Draw each line in the template
+        # Draw each line in the template as two-way roads
         for line_points in template_lines:
             # Convert world coords to screen coords
             pts_screen = [self.world_to_screen(px, py) for px, py in line_points]
             cid = self.canvas.create_line(*self.flatten(pts_screen), fill=theme['line'], width=2)
             
-            # Store as a shape with junction metadata
+            # Store as a shape with junction metadata - all junction roads are two-way
             shape = {
                 'type': 'junction',
                 'junction_type': self.selected_junction_type,
                 'points': line_points,
-                'id': cid
+                'id': cid,
+                'road_config': {
+                    'road_type': 'two_way',
+                    'directions': None  # Two-way roads allow traffic in both directions
+                }
             }
             self.shapes.append(shape)
         
+        # Install pre-configured traffic lights for this junction
+        self.install_junction_traffic_lights(self.selected_junction_type, x, y, template_lines)
+        
         print(f"Placed {self.selected_junction_type} at ({x}, {y})")
+
+    def install_junction_traffic_lights(self, junction_type, center_x, center_y, template_lines):
+        """Automatically install traffic lights on junction nodes with coordinated timing."""
+        import time
+        
+        if junction_type == 'Crossroads':
+            # Crossroads has 4 arms meeting at center
+            # Phase A: North/South (8s green, 2s yellow)
+            # Phase B: East/West (8s green, 2s yellow)
+            
+            g = self.grid_size
+            
+            # Define the nodes and their phases
+            # North and South are Phase A, East and West are Phase B
+            nodes_config = [
+                # North arm (top) - Phase A
+                {'pos': (center_x, center_y - g), 'phase': 'A', 'offset_direction': 'vertical'},
+                # South arm (bottom) - Phase A
+                {'pos': (center_x, center_y + g), 'phase': 'A', 'offset_direction': 'vertical'},
+                # East arm (right) - Phase B
+                {'pos': (center_x + g, center_y), 'phase': 'B', 'offset_direction': 'horizontal'},
+                # West arm (left) - Phase B
+                {'pos': (center_x - g, center_y), 'phase': 'B', 'offset_direction': 'horizontal'},
+            ]
+            
+            # Phase timings
+            phase_timings = {
+                'A': {'green': 8, 'yellow': 2, 'red': 10},  # Red = Phase B duration
+                'B': {'green': 8, 'yellow': 2, 'red': 10}   # Red = Phase A duration
+            }
+            
+            # Current time for staggering
+            current_time = time.time()
+            
+            for node_config in nodes_config:
+                pos = node_config['pos']
+                phase = node_config['phase']
+                timing = phase_timings[phase]
+                
+                # Find the shape that contains this node
+                nearest_shape = None
+                for shape in self.shapes:
+                    if shape.get('junction_type') == junction_type:
+                        for px, py in shape['points']:
+                            if (px, py) == pos:
+                                nearest_shape = shape
+                                break
+                    if nearest_shape:
+                        break
+                
+                if not nearest_shape:
+                    continue
+                
+                # Create marker key
+                marker_key = (nearest_shape.get('id'), pos)
+                if marker_key not in self.node_markers:
+                    self.node_markers[marker_key] = {}
+                
+                # Calculate perpendicular offset based on direction
+                if node_config['offset_direction'] == 'vertical':
+                    # For north/south arms, offset horizontally
+                    perpendicular_offset_x = 15
+                    perpendicular_offset_y = 0
+                else:
+                    # For east/west arms, offset vertically
+                    perpendicular_offset_x = 0
+                    perpendicular_offset_y = 15
+                
+                # Add two traffic lights (one on each side of two-way road)
+                for light_num in range(2):
+                    offset_x = perpendicular_offset_x if light_num == 0 else -perpendicular_offset_x
+                    offset_y = perpendicular_offset_y if light_num == 0 else -perpendicular_offset_y
+                    
+                    # Draw traffic light
+                    sx, sy = self.world_to_screen(*pos)
+                    sx += offset_x
+                    sy += offset_y
+                    
+                    # Draw border (outer circle)
+                    border_id = self.canvas.create_oval(sx - 10, sy - 10, sx + 10, sy + 10, 
+                                                       fill='black', outline='black', width=2, tags='marker')
+                    
+                    # Determine initial color based on phase
+                    # Phase A starts with green (0-10s), Phase B starts with red (wait for Phase A)
+                    if phase == 'A':
+                        initial_color = 'green'
+                        state_index = 0  # green
+                    else:  # Phase B
+                        initial_color = 'red'
+                        state_index = 2  # red
+                    
+                    # Draw inner light
+                    light_id = self.canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, 
+                                                      fill=initial_color, outline='', tags='marker')
+                    
+                    # Generate unique ID for this light
+                    light_unique_id = self.traffic_light_next_id
+                    self.traffic_light_next_id += 1
+                    
+                    # Store marker info
+                    light_key = f'traffic_light_{light_num}'
+                    self.node_markers[marker_key][light_key] = {
+                        'border_id': border_id,
+                        'light_id': light_id,
+                        'world_pos': pos,
+                        'current_color': initial_color,
+                        'perpendicular_offset': (offset_x, offset_y),
+                        'unique_id': light_unique_id
+                    }
+                    
+                    # Initialize traffic light state with phase timing
+                    self.traffic_light_states[light_unique_id] = {
+                        'state': initial_color,
+                        'state_index': state_index,
+                        'timing': timing,
+                        'marker_key': marker_key,
+                        'light_key': light_key,
+                        'last_change': current_time,
+                        'phase': phase,
+                        'junction_type': junction_type
+                    }
+            
+            print(f"Installed coordinated traffic lights on {junction_type}")
+            
+            # Start animation if this is the first set of traffic lights
+            if len(self.traffic_light_states) > 0:
+                # Check if animation is already running by checking if we have a pending after call
+                # For safety, always ensure animation is running
+                if not hasattr(self, '_animation_started'):
+                    self._animation_started = True
+                    self.animate_traffic_lights()
 
     def export_coords(self):
         out = []
@@ -716,6 +1355,55 @@ class GraphPaper(tk.Tk):
                 if 'id' in s and s['id']:
                     self.canvas.delete(s['id'])
                 s['id'] = self.canvas.create_line(*self.flatten(pts_screen), fill=theme['line'], width=2, smooth=False)
+        
+        # Redraw markers (traffic lights and pedestrian crossings)
+        self.canvas.delete('marker')
+        for marker_key, markers in self.node_markers.items():
+            # Redraw all traffic lights at this node
+            for key, marker_data in markers.items():
+                if key.startswith('traffic_light_'):
+                    wx, wy = marker_data['world_pos']
+                    sx, sy = self.world_to_screen(wx, wy)
+                    
+                    # Apply perpendicular offset
+                    offset_x, offset_y = marker_data.get('perpendicular_offset', (0, 15))
+                    sx += offset_x
+                    sy += offset_y
+                    
+                    # Redraw border (outer circle)
+                    border_id = self.canvas.create_oval(sx - 10, sy - 10, sx + 10, sy + 10, 
+                                                       fill='black', outline='black', width=2, tags='marker')
+                    
+                    # Redraw light with current color (inner circle)
+                    current_color = marker_data.get('current_color', 'green')
+                    light_id = self.canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, 
+                                                      fill=current_color, outline='', tags='marker')
+                    
+                    # Update stored IDs
+                    marker_data['border_id'] = border_id
+                    marker_data['light_id'] = light_id
+            
+            # Redraw pedestrian crossing
+            if 'ped_crossing' in markers:
+                wx, wy = markers['ped_crossing']['world_pos']
+                sx, sy = self.world_to_screen(wx, wy)
+                
+                # Apply vertical offset to avoid obstructing traffic lights
+                ped_offset_y = markers['ped_crossing'].get('offset_y', 25)
+                sy += ped_offset_y
+                
+                # Redraw housing (white rectangle)
+                housing_id = self.canvas.create_rectangle(sx - 10, sy - 6, sx + 10, sy + 6, 
+                                                         fill='white', outline='black', width=2, tags='marker')
+                
+                # Redraw pedestrian light with current color
+                current_color = markers['ped_crossing'].get('current_color', 'red')
+                ped_light_id = self.canvas.create_oval(sx - 4, sy - 3, sx + 4, sy + 3, 
+                                                      fill=current_color, outline='', tags='marker')
+                
+                # Update stored IDs
+                markers['ped_crossing']['housing_id'] = housing_id
+                markers['ped_crossing']['light_id'] = ped_light_id
 
     def flatten(self, pts):
         out = []
@@ -752,6 +1440,18 @@ class GraphPaper(tk.Tk):
             cid = self.canvas.create_line(*self.flatten(pts_screen), fill=theme['line'], width=2)
             self.current = {'type': 'line', 'points': pts, 'id': cid}
             self.shapes.append(self.current)
+
+        elif self.tool == 'traffic_light':
+            # Add traffic light to nearest junction/intersection
+            self.add_traffic_light(x, y)
+            self._dragging = False
+            return
+
+        elif self.tool == 'ped_crossing':
+            # Add pedestrian crossing to nearest road point
+            self.add_pedestrian_crossing(x, y)
+            self._dragging = False
+            return
 
         elif self.tool == 'erase':
             # remove any shape with a point near (in world coords)
@@ -832,6 +1532,25 @@ class GraphPaper(tk.Tk):
 
     def on_up(self, ev):
         self._dragging = False
+        
+        # If a road was just drawn (pen or line tool), show configuration dialog
+        if self.current and self.current['type'] in ['poly', 'line']:
+            shape = self.current
+            # Show dialog for road configuration
+            dialog = RoadConfigDialog(self, shape['type'])
+            
+            if dialog.result:
+                # Store road configuration in shape
+                shape['road_config'] = dialog.result
+                print(f"Road configured: {dialog.result}")
+            else:
+                # If cancelled, still keep the road but with default config
+                shape['road_config'] = {
+                    'road_type': 'two_way',
+                    'directions': ['North', 'South']
+                }
+                print("Road configuration cancelled, using defaults")
+        
         self.current = None
 
     def on_pan_start(self, ev):

@@ -1,97 +1,228 @@
 import tkinter as tk
 from tkinter import ttk, simpledialog
 import math
+import multiprocessing
+from multiprocessing import Process, Queue, Manager
+import time
+import random
 
 DEFAULT_GRID = 32
 
 
+def vehicle_movement_process(vehicle_id, path_points, speed, position_queue, traffic_light_queue, stop_event, junction_positions, grid_size):
+    """
+    Process function for simulating individual vehicle movement along a path.
+    This runs in a separate process for parallel computation.
+    
+    Traffic light logic:
+    - If approaching intersection (progress > 0.5) and light is green, vehicle enters junction
+    - Once inside junction zone (within grid_size distance of junction center), ignore ALL lights
+    - Only stops if outside junction and approaching red/yellow light
+    """
+    current_segment = 0
+    progress = 0.0  # Progress along current segment (0.0 to 1.0)
+    stopped = False
+    inside_junction = False  # Track if vehicle is inside a junction zone
+    
+    def is_near_junction(position):
+        """Check if position is within any junction zone."""
+        px, py = position
+        tolerance = grid_size * 1.5  # Junction zone radius
+        for jx, jy in junction_positions:
+            dist = math.sqrt((px - jx)**2 + (py - jy)**2)
+            if dist < tolerance:
+                return True
+        return False
+    
+    while not stop_event.is_set() and current_segment < len(path_points) - 1:
+        # Get current segment
+        start_point = path_points[current_segment]
+        end_point = path_points[current_segment + 1]
+        
+        # Calculate segment length
+        segment_length = math.sqrt((end_point[0] - start_point[0])**2 + 
+                                   (end_point[1] - start_point[1])**2)
+        
+        # Calculate current position
+        x = start_point[0] + (end_point[0] - start_point[0]) * progress
+        y = start_point[1] + (end_point[1] - start_point[1]) * progress
+        current_pos = (x, y)
+        
+        # Check if we're inside a junction zone
+        inside_junction = is_near_junction(current_pos)
+        
+        # Check traffic light status only if NOT inside a junction
+        if not inside_junction:
+            try:
+                # Non-blocking check for traffic light states
+                while not traffic_light_queue.empty():
+                    light_state = traffic_light_queue.get_nowait()
+                    next_pos = end_point
+                    
+                    # Check if this light is at our destination
+                    if light_state.get('position') == next_pos:
+                        current_color = light_state.get('color')
+                        
+                        # Only stop if we're far from junction and light is red/yellow
+                        if progress < 0.8:
+                            if current_color in ['red', 'yellow']:
+                                stopped = True
+                            elif current_color == 'green':
+                                stopped = False
+            except:
+                pass
+        else:
+            # Inside junction - never stop, ignore all lights
+            stopped = False
+        
+        if not stopped:
+            # Send position update to main process
+            position_queue.put({
+                'vehicle_id': vehicle_id,
+                'position': current_pos,
+                'segment': current_segment,
+                'active': True
+            })
+            
+            # Update progress based on speed and segment length
+            # Speed is in pixels per frame, normalize by segment length
+            if segment_length > 0:
+                progress += speed / segment_length
+            else:
+                progress = 1.0
+            
+            # Move to next segment if current is complete
+            if progress >= 1.0:
+                progress = 0.0
+                current_segment += 1
+                stopped = False
+        
+        time.sleep(0.02)  # Update every 20ms for smoother movement
+    
+    # Vehicle reached end of path
+    position_queue.put({
+        'vehicle_id': vehicle_id,
+        'position': None,
+        'active': False
+    })
+
+
+
 class RoadConfigDialog(tk.Toplevel):
-    """Dialog to configure road properties."""
-    def __init__(self, parent, shape_type):
+    """Dialog to configure road properties with auto-detected direction."""
+    def __init__(self, parent, shape_type, road_points):
         super().__init__(parent)
         self.title('Road Configuration')
         self.result = None
         self.shape_type = shape_type
+        self.road_points = road_points
+        
+        # Auto-detect road direction
+        self.detected_direction = self.detect_road_direction()
         
         # Make dialog modal
         self.transient(parent)
         self.grab_set()
         
         # Center dialog
-        self.geometry('350x300')
+        self.geometry('400x250')
+        
+        # Show detected direction
+        tk.Label(self, text='Road Configuration', font=('Arial', 14, 'bold')).pack(pady=(10, 5))
+        
+        # Display auto-detected direction
+        direction_info = tk.Frame(self, bg='#e0e0e0', relief='ridge', bd=2)
+        direction_info.pack(pady=10, padx=20, fill='x')
+        tk.Label(direction_info, text='Auto-Detected Direction:', font=('Arial', 10, 'bold'), 
+                bg='#e0e0e0').pack(pady=(5, 2))
+        tk.Label(direction_info, text=self.detected_direction, font=('Arial', 12), 
+                bg='#e0e0e0', fg='#0066cc').pack(pady=(2, 5))
         
         # Road type selection
-        tk.Label(self, text='Road Type:', font=('Arial', 12, 'bold')).pack(pady=(10, 5))
+        tk.Label(self, text='Road Type:', font=('Arial', 11, 'bold')).pack(pady=(10, 5))
         self.road_type_var = tk.StringVar(value='two_way')
         
-        tk.Radiobutton(self, text='Two-Way Road', variable=self.road_type_var, 
-                      value='two_way', command=self.update_direction_options).pack(anchor='w', padx=20)
+        tk.Radiobutton(self, text='Two-Way Road (Bidirectional)', variable=self.road_type_var, 
+                      value='two_way').pack(anchor='w', padx=40)
         tk.Radiobutton(self, text='One-Way Road', variable=self.road_type_var, 
-                      value='one_way', command=self.update_direction_options).pack(anchor='w', padx=20)
-        
-        # Direction frame
-        self.direction_frame = tk.Frame(self)
-        self.direction_frame.pack(pady=10, fill='both', expand=True)
-        
-        tk.Label(self.direction_frame, text='Traffic Direction:', font=('Arial', 11, 'bold')).pack(pady=(5, 5))
-        
-        # Direction options
-        self.directions = ['North', 'South', 'East', 'West', 'North-East', 'North-West', 'South-East', 'South-West']
-        self.direction1_var = tk.StringVar(value='North')
-        self.direction2_var = tk.StringVar(value='South')
-        
-        # Frame for first direction
-        self.dir1_frame = tk.Frame(self.direction_frame)
-        self.dir1_frame.pack(pady=5)
-        tk.Label(self.dir1_frame, text='Direction 1:').pack(side='left', padx=5)
-        self.dir1_combo = ttk.Combobox(self.dir1_frame, textvariable=self.direction1_var, 
-                                       values=self.directions, state='readonly', width=12)
-        self.dir1_combo.pack(side='left', padx=5)
-        
-        # Frame for second direction (for two-way roads)
-        self.dir2_frame = tk.Frame(self.direction_frame)
-        self.dir2_frame.pack(pady=5)
-        tk.Label(self.dir2_frame, text='Direction 2:').pack(side='left', padx=5)
-        self.dir2_combo = ttk.Combobox(self.dir2_frame, textvariable=self.direction2_var, 
-                                       values=self.directions, state='readonly', width=12)
-        self.dir2_combo.pack(side='left', padx=5)
+                      value='one_way').pack(anchor='w', padx=40)
         
         # Buttons
         btn_frame = tk.Frame(self)
-        btn_frame.pack(pady=10)
-        tk.Button(btn_frame, text='OK', command=self.ok_clicked, width=10).pack(side='left', padx=5)
+        btn_frame.pack(pady=20)
+        ok_btn = tk.Button(btn_frame, text='OK', command=self.ok_clicked, width=10)
+        ok_btn.pack(side='left', padx=5)
         tk.Button(btn_frame, text='Cancel', command=self.cancel_clicked, width=10).pack(side='left', padx=5)
         
-        self.update_direction_options()
+        # Bind keyboard shortcuts
+        self.bind('<Return>', lambda e: self.ok_clicked())  # Enter key
+        self.bind('<space>', lambda e: self.ok_clicked())   # Space key
+        self.bind('<Escape>', lambda e: self.cancel_clicked())  # Escape key
+        
+        # Set focus to the dialog
+        self.focus_set()
         
         # Wait for dialog to close
         self.wait_window()
     
-    def update_direction_options(self):
-        """Show/hide second direction based on road type."""
-        if self.road_type_var.get() == 'two_way':
-            self.dir2_frame.pack(pady=5)
-        else:
-            self.dir2_frame.pack_forget()
+    def detect_road_direction(self):
+        """Auto-detect road direction based on start and end points."""
+        if len(self.road_points) < 2:
+            return "Unknown"
+        
+        start = self.road_points[0]
+        end = self.road_points[-1]
+        
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        
+        # Calculate angle in degrees
+        angle = math.degrees(math.atan2(-dy, dx))  # Negative dy because y increases downward
+        
+        # Normalize to 0-360
+        if angle < 0:
+            angle += 360
+        
+        # Determine direction based on angle
+        if 337.5 <= angle or angle < 22.5:
+            return "East-West"
+        elif 22.5 <= angle < 67.5:
+            return "Northeast-Southwest"
+        elif 67.5 <= angle < 112.5:
+            return "North-South"
+        elif 112.5 <= angle < 157.5:
+            return "Northwest-Southeast"
+        elif 157.5 <= angle < 202.5:
+            return "East-West"
+        elif 202.5 <= angle < 247.5:
+            return "Northeast-Southwest"
+        elif 247.5 <= angle < 292.5:
+            return "North-South"
+        else:  # 292.5 <= angle < 337.5
+            return "Northwest-Southeast"
     
     def ok_clicked(self):
         """Store result and close dialog."""
         road_type = self.road_type_var.get()
-        dir1 = self.direction1_var.get()
         
-        if road_type == 'two_way':
-            dir2 = self.direction2_var.get()
-            self.result = {
-                'road_type': 'two_way',
-                'directions': [dir1, dir2]
-            }
-        else:
-            self.result = {
-                'road_type': 'one_way',
-                'directions': [dir1]
-            }
+        self.result = {
+            'road_type': road_type,
+            'detected_direction': self.detected_direction,
+            'angle': self.calculate_angle()
+        }
         
         self.destroy()
+    
+    def calculate_angle(self):
+        """Calculate the actual angle of the road."""
+        if len(self.road_points) < 2:
+            return 0
+        
+        start = self.road_points[0]
+        end = self.road_points[-1]
+        dx = end[0] - start[0]
+        dy = end[1] - start[1]
+        return math.degrees(math.atan2(-dy, dx))
     
     def cancel_clicked(self):
         """Close dialog without saving."""
@@ -170,6 +301,86 @@ class TrafficLightTimingDialog(tk.Toplevel):
         self.destroy()
 
 
+class VehicleRouteDialog(tk.Toplevel):
+    """Dialog to specify vehicle route through junctions."""
+    def __init__(self, parent, junction_names):
+        super().__init__(parent)
+        self.title('Vehicle Route Configuration')
+        self.result = None
+        self.junction_names = junction_names
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center dialog
+        self.geometry('500x300')
+        
+        tk.Label(self, text='Define Vehicle Route', font=('Arial', 14, 'bold')).pack(pady=(10, 5))
+        
+        # Instructions - compact format only
+        instruction_text = ('Format: DIRECTION_JUNCTION\n'
+                          '• Examples: N_A = North at Junction A | E_B = East at Junction B\n'
+                          '• Direction Codes:\n'
+                          '  - Compass: N, S, E, W, NE, NW, SE, SW\n'
+                          '  - Relative: L (left), R (right), ST (straight)\n'
+                          '• Multiple Commands: "N_A E_B S_C" or "N_A, E_B, S_C"')
+        tk.Label(self, text=instruction_text, font=('Arial', 9), wraplength=450, justify='left').pack(pady=5)
+        
+        # Show available junctions
+        if junction_names:
+            junctions_text = 'Available Junctions: ' + ', '.join(junction_names)
+            tk.Label(self, text=junctions_text, font=('Arial', 9), fg='#0066cc', wraplength=450).pack(pady=3)
+        
+        # Route text input
+        tk.Label(self, text='Route Instructions:', font=('Arial', 10, 'bold')).pack(pady=(5, 5))
+        
+        self.route_text = tk.Text(self, width=50, height=3, wrap='word')
+        self.route_text.pack(pady=5, padx=20)
+        self.route_text.focus_set()
+        
+        # Example text with compact format
+        if junction_names:
+            example = f'N_{junction_names[0] if junction_names else "A"}'
+            self.route_text.insert('1.0', example)
+        
+        # Buttons
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=15)
+        tk.Button(btn_frame, text='OK', command=self.ok_clicked, width=10).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Skip (Auto Route)', command=self.skip_clicked, width=15).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Cancel', command=self.cancel_clicked, width=10).pack(side='left', padx=5)
+        
+        # Bind keyboard shortcuts
+        self.bind('<Return>', lambda e: self.ok_clicked())
+        self.bind('<Escape>', lambda e: self.cancel_clicked())
+        
+        # Wait for dialog to close
+        self.wait_window()
+    
+    def ok_clicked(self):
+        """Store result and close dialog."""
+        route_instructions = self.route_text.get('1.0', 'end-1c').strip()
+        self.result = {
+            'instructions': route_instructions,
+            'type': 'custom'
+        }
+        self.destroy()
+    
+    def skip_clicked(self):
+        """Use automatic routing."""
+        self.result = {
+            'instructions': 'Auto-route',
+            'type': 'auto'
+        }
+        self.destroy()
+    
+    def cancel_clicked(self):
+        """Close dialog without saving."""
+        self.result = None
+        self.destroy()
+
+
 class GraphPaper(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -183,6 +394,10 @@ class GraphPaper(tk.Tk):
         self.current = None
         self.selection = None
         self.selected_junction_type = None  # stores the selected junction template
+        
+        # Junction naming
+        self.junction_counter = 0  # Counter for naming junctions A, B, C, etc.
+        self.junction_labels = {}  # {junction_name: canvas_text_id}
         
         # Config tool state
         self.config_tool = None  # 'traffic_light' or 'ped_crossing'
@@ -238,10 +453,20 @@ class GraphPaper(tk.Tk):
                 'text': 'white'
             }
         }
+        
+        # Parallel computing: Vehicle simulation
+        self.vehicles = {}  # {vehicle_id: {'process': Process, 'canvas_id': int, 'path': [...], 'position': (x,y)}}
+        self.vehicle_position_queue = Queue()
+        self.traffic_light_queue = Queue()
+        self.manager = Manager()
+        self.stop_event = self.manager.Event()
+        self.vehicle_next_id = 0
+        self.simulation_running = False
 
         self.create_ui()
         self.draw_grid()
         self.apply_theme()
+        self.update_vehicle_positions()  # Start vehicle position update loop
 
     def create_ui(self):
         self.toolbar = tk.Frame(self)
@@ -358,6 +583,45 @@ class GraphPaper(tk.Tk):
         self.config_buttons.append(ped_crossing_btn)
         self.buttons.append(ped_crossing_btn)
         
+        # Simulation category button (for parallel computing demo)
+        self.simulation_btn = tk.Button(self.toolbar, text='Simulation', command=self.toggle_simulation,
+                                       relief='flat', bd=0, padx=12, pady=6,
+                                       highlightthickness=0, borderwidth=0)
+        self.simulation_btn.pack(side='left', padx=4, pady=4)
+        self.buttons.append(self.simulation_btn)
+        
+        # Simulation sub-buttons (initially hidden)
+        self.simulation_frame = tk.Frame(self.toolbar)
+        self.simulation_buttons = []
+        self.simulation_expanded = False
+        
+        # Spawn vehicle button
+        spawn_vehicle_btn = tk.Button(self.simulation_frame, text='Spawn Vehicle', 
+                                      command=self.spawn_vehicle,
+                                      relief='flat', bd=0, padx=12, pady=6,
+                                      highlightthickness=0, borderwidth=0)
+        spawn_vehicle_btn.pack(side='left', padx=2)
+        self.simulation_buttons.append(spawn_vehicle_btn)
+        self.buttons.append(spawn_vehicle_btn)
+        
+        # Start/Stop simulation button
+        self.sim_control_btn = tk.Button(self.simulation_frame, text='Start Simulation', 
+                                         command=self.toggle_simulation_control,
+                                         relief='flat', bd=0, padx=12, pady=6,
+                                         highlightthickness=0, borderwidth=0)
+        self.sim_control_btn.pack(side='left', padx=2)
+        self.simulation_buttons.append(self.sim_control_btn)
+        self.buttons.append(self.sim_control_btn)
+        
+        # Clear vehicles button
+        clear_vehicles_btn = tk.Button(self.simulation_frame, text='Clear Vehicles', 
+                                       command=self.clear_vehicles,
+                                       relief='flat', bd=0, padx=12, pady=6,
+                                       highlightthickness=0, borderwidth=0)
+        clear_vehicles_btn.pack(side='left', padx=2)
+        self.simulation_buttons.append(clear_vehicles_btn)
+        self.buttons.append(clear_vehicles_btn)
+        
         # theme toggle button - placed on the right side
         self.theme_btn = tk.Button(self.toolbar, text='🌙', command=self.toggle_theme,
                                    relief='flat', bd=0, padx=12, pady=6,
@@ -419,10 +683,14 @@ class GraphPaper(tk.Tk):
             if self.config_expanded:
                 self.config_expanded = False
                 self.config_frame.pack_forget()
+            if self.simulation_expanded:
+                self.simulation_expanded = False
+                self.simulation_frame.pack_forget()
             # Hide other category buttons
             self.view_btn.pack_forget()
             self.monitor_btn.pack_forget()
             self.config_btn.pack_forget()
+            self.simulation_btn.pack_forget()
             # Show Edit Roads buttons
             self.edit_roads_frame.pack(side='left', padx=4, pady=4)
         else:
@@ -432,6 +700,7 @@ class GraphPaper(tk.Tk):
             self.view_btn.pack(side='left', padx=4, pady=4)
             self.monitor_btn.pack(side='left', padx=4, pady=4)
             self.config_btn.pack(side='left', padx=4, pady=4)
+            self.simulation_btn.pack(side='left', padx=4, pady=4)
         
         self.apply_theme()
     
@@ -450,10 +719,14 @@ class GraphPaper(tk.Tk):
             if self.config_expanded:
                 self.config_expanded = False
                 self.config_frame.pack_forget()
+            if self.simulation_expanded:
+                self.simulation_expanded = False
+                self.simulation_frame.pack_forget()
             # Hide other category buttons
             self.edit_roads_btn.pack_forget()
             self.monitor_btn.pack_forget()
             self.config_btn.pack_forget()
+            self.simulation_btn.pack_forget()
             # Show View buttons
             self.view_frame.pack(side='left', padx=4, pady=4)
         else:
@@ -463,6 +736,7 @@ class GraphPaper(tk.Tk):
             self.edit_roads_btn.pack(side='left', padx=4, pady=4)
             self.monitor_btn.pack(side='left', padx=4, pady=4)
             self.config_btn.pack(side='left', padx=4, pady=4)
+            self.simulation_btn.pack(side='left', padx=4, pady=4)
         
         self.apply_theme()
     
@@ -481,10 +755,14 @@ class GraphPaper(tk.Tk):
             if self.config_expanded:
                 self.config_expanded = False
                 self.config_frame.pack_forget()
+            if self.simulation_expanded:
+                self.simulation_expanded = False
+                self.simulation_frame.pack_forget()
             # Hide other category buttons
             self.edit_roads_btn.pack_forget()
             self.view_btn.pack_forget()
             self.config_btn.pack_forget()
+            self.simulation_btn.pack_forget()
             # Show Monitor buttons
             self.monitor_frame.pack(side='left', padx=4, pady=4)
         else:
@@ -494,6 +772,7 @@ class GraphPaper(tk.Tk):
             self.edit_roads_btn.pack(side='left', padx=4, pady=4)
             self.view_btn.pack(side='left', padx=4, pady=4)
             self.config_btn.pack(side='left', padx=4, pady=4)
+            self.simulation_btn.pack(side='left', padx=4, pady=4)
         
         self.apply_theme()
     
@@ -512,10 +791,14 @@ class GraphPaper(tk.Tk):
             if self.monitor_expanded:
                 self.monitor_expanded = False
                 self.monitor_frame.pack_forget()
+            if self.simulation_expanded:
+                self.simulation_expanded = False
+                self.simulation_frame.pack_forget()
             # Hide other category buttons
             self.edit_roads_btn.pack_forget()
             self.view_btn.pack_forget()
             self.monitor_btn.pack_forget()
+            self.simulation_btn.pack_forget()
             # Show Config buttons
             self.config_frame.pack(side='left', padx=4, pady=4)
         else:
@@ -525,6 +808,43 @@ class GraphPaper(tk.Tk):
             self.edit_roads_btn.pack(side='left', padx=4, pady=4)
             self.view_btn.pack(side='left', padx=4, pady=4)
             self.monitor_btn.pack(side='left', padx=4, pady=4)
+            self.simulation_btn.pack(side='left', padx=4, pady=4)
+        
+        self.apply_theme()
+    
+    def toggle_simulation(self):
+        """Toggle the Simulation submenu."""
+        self.simulation_expanded = not self.simulation_expanded
+        
+        if self.simulation_expanded:
+            # Collapse other categories if open
+            if self.edit_roads_expanded:
+                self.edit_roads_expanded = False
+                self.edit_roads_frame.pack_forget()
+            if self.view_expanded:
+                self.view_expanded = False
+                self.view_frame.pack_forget()
+            if self.monitor_expanded:
+                self.monitor_expanded = False
+                self.monitor_frame.pack_forget()
+            if self.config_expanded:
+                self.config_expanded = False
+                self.config_frame.pack_forget()
+            # Hide other category buttons
+            self.edit_roads_btn.pack_forget()
+            self.view_btn.pack_forget()
+            self.monitor_btn.pack_forget()
+            self.config_btn.pack_forget()
+            # Show Simulation buttons
+            self.simulation_frame.pack(side='left', padx=4, pady=4)
+        else:
+            # Hide Simulation buttons
+            self.simulation_frame.pack_forget()
+            # Show all category buttons in order
+            self.edit_roads_btn.pack(side='left', padx=4, pady=4)
+            self.view_btn.pack(side='left', padx=4, pady=4)
+            self.monitor_btn.pack(side='left', padx=4, pady=4)
+            self.config_btn.pack(side='left', padx=4, pady=4)
         
         self.apply_theme()
     
@@ -728,17 +1048,24 @@ class GraphPaper(tk.Tk):
                 perpendicular_offset_x = -perpendicular_offset_x
                 perpendicular_offset_y = -perpendicular_offset_y
             
-            # Draw traffic light as filled circle with border
+            # Draw traffic light as filled circle with border (scaled)
             sx, sy = self.world_to_screen(*nearest_point)
-            sx += perpendicular_offset_x
-            sy += perpendicular_offset_y
+            sx += perpendicular_offset_x * self.scale
+            sy += perpendicular_offset_y * self.scale
+            
+            # Scale the sizes
+            outer_radius = 10 * self.scale
+            inner_radius = 8 * self.scale
+            border_width = max(1, int(2 * self.scale))
             
             # Draw outer circle (border) - larger circle in black
-            border_id = self.canvas.create_oval(sx - 10, sy - 10, sx + 10, sy + 10, 
-                                               fill='black', outline='black', width=2, tags='marker')
+            border_id = self.canvas.create_oval(sx - outer_radius, sy - outer_radius, 
+                                               sx + outer_radius, sy + outer_radius, 
+                                               fill='black', outline='black', width=border_width, tags='marker')
             
             # Draw inner light (starts with green)
-            light_id = self.canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, 
+            light_id = self.canvas.create_oval(sx - inner_radius, sy - inner_radius, 
+                                              sx + inner_radius, sy + inner_radius, 
                                               fill='green', outline='', tags='marker')
             
             # Generate unique ID for this traffic light
@@ -810,17 +1137,24 @@ class GraphPaper(tk.Tk):
             
             # Position pedestrian crossing below the traffic lights to avoid obstruction
             sx, sy = self.world_to_screen(*nearest_point)
-            ped_offset_y = 25  # Place 25 pixels below the node
+            ped_offset_y = 25  # Base offset (will be scaled)
+            
+            # Scale the sizes and offset
+            scaled_offset = ped_offset_y * self.scale
+            housing_width = 10 * self.scale
+            housing_height = 6 * self.scale
+            light_radius = 4 * self.scale
+            border_width = max(1, int(2 * self.scale))
             
             # Draw pedestrian crossing housing (white rectangle with stripes)
-            housing_id = self.canvas.create_rectangle(sx - 10, sy + ped_offset_y - 6, 
-                                                     sx + 10, sy + ped_offset_y + 6, 
-                                                     fill='white', outline='black', width=2, 
+            housing_id = self.canvas.create_rectangle(sx - housing_width, sy + scaled_offset - housing_height, 
+                                                     sx + housing_width, sy + scaled_offset + housing_height, 
+                                                     fill='white', outline='black', width=border_width, 
                                                      tags='marker')
             
             # Draw pedestrian light indicator (starts with red since traffic lights start green)
-            ped_light_id = self.canvas.create_oval(sx - 4, sy + ped_offset_y - 3, 
-                                                  sx + 4, sy + ped_offset_y + 3, 
+            ped_light_id = self.canvas.create_oval(sx - light_radius, sy + scaled_offset - light_radius, 
+                                                  sx + light_radius, sy + scaled_offset + light_radius, 
                                                   fill='red', outline='', tags='marker')
             
             # Store marker info
@@ -944,6 +1278,615 @@ class GraphPaper(tk.Tk):
         # Schedule next update (check every 100ms for smoother timing)
         self.after(100, self.animate_traffic_lights)
     
+    def parse_route_instructions(self, instructions):
+        """Parse route instructions into structured commands.
+        
+        ONLY supports compact format: DIRECTION_JUNCTION (e.g., "N_A" = north at Junction A)
+        Direction codes:
+        - N, S, E, W = North, South, East, West
+        - NE, NW, SE, SW = Northeast, Northwest, Southeast, Southwest
+        - L, R, ST = Left, Right, Straight (relative)
+        
+        Multiple commands: "N_A E_B S_C" or "N_A, E_B, S_C"
+        """
+        if not instructions or instructions.strip().lower() == 'auto':
+            return []
+        
+        commands = []
+        
+        # Parse compact format (DIRECTION_JUNCTION) only
+        # Split by spaces or commas
+        parts = instructions.upper().replace(',', ' ').split()
+        
+        for part in parts:
+            if '_' in part:
+                # Compact format detected
+                components = part.split('_')
+                if len(components) == 2:
+                    dir_code = components[0]
+                    junction = components[1]
+                    
+                    # Validate junction exists
+                    if junction in self.junction_labels:
+                        # Map direction code to direction name
+                        direction_map = {
+                            'N': ('north', 'absolute'),
+                            'S': ('south', 'absolute'),
+                            'E': ('east', 'absolute'),
+                            'W': ('west', 'absolute'),
+                            'NE': ('northeast', 'absolute'),
+                            'NW': ('northwest', 'absolute'),
+                            'SE': ('southeast', 'absolute'),
+                            'SW': ('southwest', 'absolute'),
+                            'L': ('left', 'relative'),
+                            'R': ('right', 'relative'),
+                            'ST': ('straight', 'relative')
+                        }
+                        
+                        if dir_code in direction_map:
+                            direction, dir_type = direction_map[dir_code]
+                            commands.append({
+                                'junction': junction,
+                                'direction': direction,
+                                'type': dir_type
+                            })
+                            print(f"Parsed: {direction} at Junction {junction}")
+                        else:
+                            print(f"Unknown direction code: {dir_code}. Use N,S,E,W,NE,NW,SE,SW,L,R,ST")
+                    else:
+                        print(f"Unknown junction: {junction}")
+            else:
+                # Not in compact format - reject it
+                print(f"Invalid format: '{part}'. Use DIRECTION_JUNCTION format (e.g., N_A)")
+        
+        return commands
+    
+    def calculate_absolute_direction(self, direction_vec):
+        """Calculate the absolute compass direction of a vector.
+        Returns: 'north', 'south', 'east', 'west', 'northeast', 'northwest', 'southeast', 'southwest'
+        
+        In canvas coordinates: 
+        - Positive X = East
+        - Negative X = West  
+        - Negative Y = North (canvas Y increases downward)
+        - Positive Y = South
+        """
+        if direction_vec[0] == 0 and direction_vec[1] == 0:
+            return 'north'  # Default
+        
+        # Calculate angle in degrees from east (0°)
+        angle = math.degrees(math.atan2(direction_vec[1], direction_vec[0]))
+        
+        # Normalize to 0-360
+        angle = angle % 360
+        
+        # In canvas coordinates, we need to flip Y-axis interpretation
+        # atan2(y, x) gives: right=0°, down=90°, left=180°, up=270°
+        # We want: north=up=270°, east=right=0°, south=down=90°, west=left=180°
+        
+        # Determine direction based on angle ranges (with 22.5° tolerance for each cardinal)
+        if 337.5 <= angle or angle < 22.5:
+            return 'east'
+        elif 22.5 <= angle < 67.5:
+            return 'southeast'
+        elif 67.5 <= angle < 112.5:
+            return 'south'
+        elif 112.5 <= angle < 157.5:
+            return 'southwest'
+        elif 157.5 <= angle < 202.5:
+            return 'west'
+        elif 202.5 <= angle < 247.5:
+            return 'northwest'
+        elif 247.5 <= angle < 292.5:
+            return 'north'
+        elif 292.5 <= angle < 337.5:
+            return 'northeast'
+        
+        return 'north'  # Fallback
+    
+    def calculate_turn_direction(self, incoming_vec, outgoing_vec):
+        """Calculate if a turn is left, right, or straight based on vectors.
+        Returns: 'left', 'right', 'straight', or 'back'
+        """
+        # Normalize vectors
+        in_len = math.sqrt(incoming_vec[0]**2 + incoming_vec[1]**2)
+        out_len = math.sqrt(outgoing_vec[0]**2 + outgoing_vec[1]**2)
+        
+        if in_len == 0 or out_len == 0:
+            return 'straight'
+        
+        in_norm = (incoming_vec[0] / in_len, incoming_vec[1] / in_len)
+        out_norm = (outgoing_vec[0] / out_len, outgoing_vec[1] / out_len)
+        
+        # Calculate cross product (for left/right) and dot product (for forward/back)
+        cross = in_norm[0] * out_norm[1] - in_norm[1] * out_norm[0]
+        dot = in_norm[0] * out_norm[0] + in_norm[1] * out_norm[1]
+        
+        # Determine direction based on angle
+        if dot < -0.7:  # ~135 degrees or more - going back
+            return 'back'
+        elif abs(cross) < 0.3:  # Nearly straight (angle < ~17 degrees)
+            return 'straight'
+        elif cross > 0:  # Positive cross product = left turn
+            return 'left'
+        else:  # Negative cross product = right turn
+            return 'right'
+    
+    def get_junction_at_point(self, point):
+        """Find which junction (if any) is at the given point."""
+        tolerance = self.grid_size * 0.5
+        
+        for junction_name, label_data in self.junction_labels.items():
+            jx, jy = label_data['position']
+            dist = math.sqrt((point[0] - jx)**2 + (point[1] - jy)**2)
+            if dist < tolerance:
+                return junction_name
+        
+        return None
+    
+    def get_exit_roads_from_junction(self, junction_point, incoming_point):
+        """Get all possible exit roads from a junction, excluding the incoming road."""
+        tolerance = 5
+        exit_roads = []
+        
+        for shape in self.shapes:
+            if shape['type'] in ['line', 'poly', 'junction'] and len(shape['points']) >= 2:
+                # Check if this road connects to the junction
+                for i, point in enumerate(shape['points']):
+                    dist = math.sqrt((point[0] - junction_point[0])**2 + 
+                                   (point[1] - junction_point[1])**2)
+                    
+                    if dist < tolerance:
+                        # This road connects to junction
+                        # Get the next point to determine direction
+                        if i < len(shape['points']) - 1:
+                            next_point = shape['points'][i + 1]
+                        elif i > 0:
+                            next_point = shape['points'][i - 1]
+                        else:
+                            continue
+                        
+                        # Don't include the road we came from
+                        if incoming_point:
+                            dist_to_incoming = math.sqrt((next_point[0] - incoming_point[0])**2 + 
+                                                        (next_point[1] - incoming_point[1])**2)
+                            if dist_to_incoming < tolerance:
+                                continue
+                        
+                        # Calculate direction vector
+                        direction_vec = (next_point[0] - junction_point[0], 
+                                       next_point[1] - junction_point[1])
+                        
+                        exit_roads.append({
+                            'shape': shape,
+                            'start_index': i,
+                            'next_point': next_point,
+                            'direction_vec': direction_vec
+                        })
+                        break
+        
+        return exit_roads
+    
+    def build_vehicle_path_with_route(self, start_shape, start_index, route_commands):
+        """Build a path through connected roads following route instructions."""
+        path_points = start_shape['points'][start_index:].copy()
+        current_endpoint = path_points[-1]
+        prev_point = path_points[-2] if len(path_points) >= 2 else None
+        visited_shapes = {id(start_shape)}
+        
+        command_index = 0
+        max_extensions = 30
+        extensions = 0
+        
+        while extensions < max_extensions:
+            # Check if we're at a junction
+            junction_name = self.get_junction_at_point(current_endpoint)
+            
+            if junction_name and command_index < len(route_commands):
+                # Check if this is the junction mentioned in the next command
+                next_command = route_commands[command_index]
+                
+                if next_command['junction'] == junction_name:
+                    # We need to make a decision here
+                    desired_direction = next_command['direction']
+                    direction_type = next_command.get('type', 'relative')
+                    
+                    # Get all possible exits
+                    exit_roads = self.get_exit_roads_from_junction(current_endpoint, prev_point)
+                    
+                    if not exit_roads:
+                        print(f"No exit roads found at Junction {junction_name}")
+                        break
+                    
+                    # Find the exit that matches desired direction
+                    best_exit = None
+                    
+                    if direction_type == 'absolute':
+                        # Match based on absolute compass direction
+                        for exit_road in exit_roads:
+                            exit_direction = self.calculate_absolute_direction(exit_road['direction_vec'])
+                            
+                            # Check for exact match or compatible match
+                            if exit_direction == desired_direction:
+                                best_exit = exit_road
+                                break
+                            # Also check if main cardinal direction matches (e.g., "north" matches "northeast")
+                            elif desired_direction in exit_direction or exit_direction in desired_direction:
+                                if not best_exit:  # Take first compatible match as fallback
+                                    best_exit = exit_road
+                        
+                        if best_exit:
+                            exit_dir_name = self.calculate_absolute_direction(best_exit['direction_vec'])
+                            print(f"Taking {exit_dir_name} exit at Junction {junction_name} (requested: {desired_direction})")
+                        else:
+                            print(f"Could not find {desired_direction} exit at Junction {junction_name}")
+                            # Show available directions for debugging
+                            available = [self.calculate_absolute_direction(e['direction_vec']) for e in exit_roads]
+                            print(f"Available exits: {available}")
+                            if exit_roads:
+                                best_exit = exit_roads[0]  # Take first available
+                    
+                    else:
+                        # Match based on relative direction (left/right/straight)
+                        # Calculate incoming direction vector
+                        if prev_point:
+                            incoming_vec = (current_endpoint[0] - prev_point[0],
+                                          current_endpoint[1] - prev_point[1])
+                        else:
+                            incoming_vec = (1, 0)  # Default direction
+                        
+                        for exit_road in exit_roads:
+                            turn = self.calculate_turn_direction(incoming_vec, exit_road['direction_vec'])
+                            if turn == desired_direction:
+                                best_exit = exit_road
+                                break
+                        
+                        if not best_exit and exit_roads:
+                            print(f"Could not find {desired_direction} turn at Junction {junction_name}, taking available exit")
+                            best_exit = exit_roads[0]
+                    
+                    if best_exit:
+                        # Add this road to path
+                        shape = best_exit['shape']
+                        start_idx = best_exit['start_index']
+                        
+                        if id(shape) not in visited_shapes:
+                            # Add points from this shape
+                            new_points = shape['points'][start_idx + 1:]
+                            if new_points:
+                                prev_point = current_endpoint
+                                path_points.extend(new_points)
+                                current_endpoint = path_points[-1]
+                                visited_shapes.add(id(shape))
+                                command_index += 1
+                            else:
+                                # Try reversed direction
+                                new_points = list(reversed(shape['points'][:start_idx]))
+                                if new_points:
+                                    prev_point = current_endpoint
+                                    path_points.extend(new_points)
+                                    current_endpoint = path_points[-1]
+                                    visited_shapes.add(id(shape))
+                                    command_index += 1
+                                else:
+                                    break
+                        else:
+                            break
+                    else:
+                        break
+                else:
+                    # Not the junction we're looking for, continue straight
+                    found = self.continue_on_connected_road(path_points, current_endpoint, 
+                                                           visited_shapes, prev_point)
+                    if found:
+                        prev_point = current_endpoint
+                        current_endpoint = path_points[-1]
+                    else:
+                        break
+            else:
+                # No junction or no more commands, just continue on connected roads
+                found = self.continue_on_connected_road(path_points, current_endpoint, 
+                                                       visited_shapes, prev_point)
+                if found:
+                    prev_point = current_endpoint
+                    current_endpoint = path_points[-1]
+                else:
+                    break
+            
+            extensions += 1
+        
+        return path_points
+    
+    def continue_on_connected_road(self, path_points, current_endpoint, visited_shapes, prev_point):
+        """Continue path on any connected road (helper for auto-routing)."""
+        tolerance = 5
+        
+        for shape in self.shapes:
+            if shape['type'] in ['line', 'poly', 'junction'] and id(shape) not in visited_shapes:
+                if len(shape['points']) >= 2:
+                    shape_start = shape['points'][0]
+                    shape_end = shape['points'][-1]
+                    
+                    dist_to_start = math.sqrt((current_endpoint[0] - shape_start[0])**2 + 
+                                             (current_endpoint[1] - shape_start[1])**2)
+                    dist_to_end = math.sqrt((current_endpoint[0] - shape_end[0])**2 + 
+                                           (current_endpoint[1] - shape_end[1])**2)
+                    
+                    if dist_to_start < tolerance:
+                        path_points.extend(shape['points'][1:])
+                        visited_shapes.add(id(shape))
+                        return True
+                    elif dist_to_end < tolerance:
+                        path_points.extend(list(reversed(shape['points'][:-1])))
+                        visited_shapes.add(id(shape))
+                        return True
+        
+        return False
+    
+    def build_vehicle_path(self, start_shape, start_index):
+        """Build a continuous path through connected road segments (auto-mode)."""
+        path_points = start_shape['points'][start_index:].copy()
+        current_endpoint = path_points[-1]
+        visited_shapes = {id(start_shape)}
+        
+        # Keep extending path by finding connected roads
+        max_extensions = 20  # Prevent infinite loops
+        extensions = 0
+        
+        while extensions < max_extensions:
+            found = self.continue_on_connected_road(path_points, current_endpoint, 
+                                                   visited_shapes, None)
+            if found:
+                current_endpoint = path_points[-1]
+            else:
+                break
+            
+            extensions += 1
+        
+        return path_points
+    
+    def spawn_vehicle(self):
+        """Enable spawn mode - click on a node to spawn a vehicle there."""
+        self.tool = 'spawn_vehicle'
+        self.status.config(text='Tool: Click on a road node to spawn vehicle | Grid: %d' % self.grid_size)
+        print("Click on any road node to spawn a vehicle")
+    
+    def spawn_vehicle_at_node(self, x, y):
+        """Spawn a vehicle at a specific node location."""
+        if not self.shapes:
+            print("No roads available. Draw some roads first!")
+            return
+        
+        # Find nearest node from any shape
+        min_dist = float('inf')
+        nearest_point = None
+        nearest_shape = None
+        
+        thresh = self.grid_size * 1.5
+        for shape in self.shapes:
+            if shape['type'] in ['line', 'poly', 'junction'] and len(shape['points']) >= 2:
+                for i, (px, py) in enumerate(shape['points']):
+                    dist = math.sqrt((px - x) ** 2 + (py - y) ** 2)
+                    if dist < min_dist and dist < thresh:
+                        min_dist = dist
+                        nearest_point = (px, py)
+                        nearest_shape = shape
+        
+        if not nearest_point or not nearest_shape:
+            print("No road node found nearby. Click closer to a road node.")
+            return
+        
+        # Find the point index in the shape
+        point_index = None
+        for i, point in enumerate(nearest_shape['points']):
+            if point == nearest_point:
+                point_index = i
+                break
+        
+        if point_index is None:
+            return
+        
+        # Get list of available junction names
+        junction_names = sorted(self.junction_labels.keys())
+        
+        # Show route configuration dialog FIRST
+        route_dialog = VehicleRouteDialog(self, junction_names)
+        
+        if not route_dialog.result:
+            print("Vehicle spawn cancelled")
+            return
+        
+        route_info = route_dialog.result
+        
+        # Parse route instructions
+        route_commands = []
+        if route_info['type'] == 'custom':
+            route_commands = self.parse_route_instructions(route_info['instructions'])
+            print(f"Parsed route commands: {route_commands}")
+        
+        # Build path using route commands (if custom) or auto (if skip)
+        if route_commands:
+            path_points = self.build_vehicle_path_with_route(nearest_shape, point_index, route_commands)
+        else:
+            path_points = self.build_vehicle_path(nearest_shape, point_index)
+        
+        if len(path_points) < 2:
+            print("Not enough road segments from this point. Choose a different node.")
+            return
+        
+        # Create vehicle with random speed
+        vehicle_id = self.vehicle_next_id
+        self.vehicle_next_id += 1
+        
+        # Random color for vehicle
+        colors = ['red', 'blue', 'green', 'orange', 'purple', 'cyan']
+        vehicle_color = random.choice(colors)
+        
+        # Create vehicle visual (small circle, scaled)
+        start_pos = path_points[0]
+        sx, sy = self.world_to_screen(*start_pos)
+        vehicle_radius = 6 * self.scale
+        border_width = max(1, int(2 * self.scale))
+        canvas_id = self.canvas.create_oval(sx - vehicle_radius, sy - vehicle_radius, 
+                                           sx + vehicle_radius, sy + vehicle_radius,
+                                           fill=vehicle_color, outline='black', width=border_width, tags='vehicle')
+        
+        # Speed in pixels per frame (higher = faster, 1-3 pixels per frame is good)
+        speed = random.uniform(1.0, 3.0)  # Random speed in pixels per update
+        
+        # Collect all junction positions for the vehicle process
+        junction_positions = [(data['position'][0], data['position'][1]) 
+                             for data in self.junction_labels.values()]
+        
+        # Create process but DON'T start it yet - wait for simulation to start
+        process = Process(target=vehicle_movement_process,
+                         args=(vehicle_id, path_points, speed, 
+                               self.vehicle_position_queue, self.traffic_light_queue, 
+                               self.stop_event, junction_positions, self.grid_size))
+        
+        # Store vehicle info (process not started yet)
+        self.vehicles[vehicle_id] = {
+            'process': process,
+            'canvas_id': canvas_id,
+            'path': path_points,
+            'position': start_pos,
+            'color': vehicle_color,
+            'started': False,  # Track if process has been started
+            'route': route_info
+        }
+        
+        print(f"Vehicle {vehicle_id} ready at node with route: {route_info['instructions']}")
+        print(f"Press 'Start Simulation' to begin vehicle movement")
+    
+    def toggle_simulation_control(self):
+        """Start or stop the simulation."""
+        self.simulation_running = not self.simulation_running
+        
+        if self.simulation_running:
+            self.stop_event.clear()
+            
+            # Start all vehicles that haven't been started yet
+            for vehicle_id, vehicle_data in self.vehicles.items():
+                if not vehicle_data.get('started', False):
+                    vehicle_data['process'].start()
+                    vehicle_data['started'] = True
+                    print(f"Started vehicle {vehicle_id} (Process ID: {vehicle_data['process'].pid})")
+            
+            self.sim_control_btn.config(text='Stop Simulation')
+            print("Simulation started - vehicles moving in parallel processes")
+        else:
+            self.stop_event.set()
+            self.sim_control_btn.config(text='Start Simulation')
+            print("Simulation stopped")
+    
+    def clear_vehicles(self):
+        """Remove all vehicles and stop their processes."""
+        # Stop all vehicle processes
+        self.stop_event.set()
+        
+        for vehicle_id, vehicle_data in list(self.vehicles.items()):
+            # Terminate process forcefully
+            try:
+                if vehicle_data['process'].is_alive():
+                    vehicle_data['process'].terminate()
+                    vehicle_data['process'].join(timeout=0.5)
+                    # If still alive, kill it
+                    if vehicle_data['process'].is_alive():
+                        vehicle_data['process'].kill()
+                        vehicle_data['process'].join(timeout=0.5)
+            except Exception as e:
+                print(f"Error terminating vehicle {vehicle_id}: {e}")
+            
+            # Remove from canvas
+            try:
+                self.canvas.delete(vehicle_data['canvas_id'])
+            except:
+                pass
+        
+        # Clear vehicles dict
+        self.vehicles.clear()
+        
+        # Clear queues
+        while not self.vehicle_position_queue.empty():
+            try:
+                self.vehicle_position_queue.get_nowait()
+            except:
+                break
+        
+        while not self.traffic_light_queue.empty():
+            try:
+                self.traffic_light_queue.get_nowait()
+            except:
+                break
+        
+        print("All vehicles cleared")
+        self.simulation_running = False
+        if hasattr(self, 'sim_control_btn'):
+            self.sim_control_btn.config(text='Start Simulation')
+    
+    def update_vehicle_positions(self):
+        """Update vehicle positions from the queue (runs in main thread)."""
+        # Process all position updates from the queue
+        updates_processed = 0
+        while not self.vehicle_position_queue.empty() and updates_processed < 50:
+            try:
+                update = self.vehicle_position_queue.get_nowait()
+                vehicle_id = update['vehicle_id']
+                
+                if vehicle_id in self.vehicles:
+                    if update['active']:
+                        # Update vehicle position on canvas
+                        new_pos = update['position']
+                        self.vehicles[vehicle_id]['position'] = new_pos
+                        
+                        # Convert to screen coords and move vehicle (scaled)
+                        sx, sy = self.world_to_screen(*new_pos)
+                        canvas_id = self.vehicles[vehicle_id]['canvas_id']
+                        vehicle_radius = 6 * self.scale
+                        
+                        # Move the oval to new position
+                        self.canvas.coords(canvas_id, sx - vehicle_radius, sy - vehicle_radius, 
+                                         sx + vehicle_radius, sy + vehicle_radius)
+                    else:
+                        # Vehicle reached end - remove it
+                        vehicle_data = self.vehicles[vehicle_id]
+                        if vehicle_data['process'].is_alive():
+                            vehicle_data['process'].terminate()
+                            vehicle_data['process'].join(timeout=0.5)
+                        
+                        try:
+                            self.canvas.delete(vehicle_data['canvas_id'])
+                        except:
+                            pass
+                        
+                        del self.vehicles[vehicle_id]
+                        print(f"Vehicle {vehicle_id} completed its route")
+                
+                updates_processed += 1
+            except:
+                break
+        
+        # Send traffic light states to vehicle processes
+        if self.traffic_light_states:
+            for light_id, state in self.traffic_light_states.items():
+                marker_key = state.get('marker_key')
+                if marker_key and marker_key in self.node_markers:
+                    # Get the position of this traffic light
+                    for key, marker_data in self.node_markers[marker_key].items():
+                        if key.startswith('traffic_light_'):
+                            pos = marker_data.get('world_pos')
+                            color = state.get('state', 'green')
+                            try:
+                                self.traffic_light_queue.put_nowait({
+                                    'position': pos,
+                                    'color': color
+                                })
+                            except:
+                                pass
+        
+        # Schedule next update
+        self.after(50, self.update_vehicle_positions)
+    
     def select_junction(self, junction_type):
         """Handle selection of a specific junction type."""
         self.selected_junction_type = junction_type
@@ -1048,11 +1991,12 @@ class GraphPaper(tk.Tk):
             x, y = self.junction_preview_pos
             self.place_junction(x, y)
             self.clear_junction_preview()
-            # Switch back to pen mode
+            # Switch back to pen mode and clear any current drawing
             self.selected_junction_type = None
             self.junction_preview_pos = None
             self.junction_rotation = 0
             self.junction_flipped = False
+            self.current = None  # Clear any current shape to prevent dialog
             self.set_tool('pen')
     
     def on_rotate_press(self, ev):
@@ -1119,6 +2063,21 @@ class GraphPaper(tk.Tk):
         }
         return templates.get(junction_type, [])
     
+    def get_junction_name(self):
+        """Generate junction name like A, B, C, ..., Z, AA, AB, etc."""
+        name = ''
+        num = self.junction_counter
+        
+        while True:
+            name = chr(65 + (num % 26)) + name
+            num = num // 26
+            if num == 0:
+                break
+            num -= 1  # Adjust for AA, AB pattern
+        
+        self.junction_counter += 1
+        return name
+    
     def place_junction(self, x, y):
         """Place a junction template at the given coordinates."""
         if not self.selected_junction_type:
@@ -1134,6 +2093,9 @@ class GraphPaper(tk.Tk):
         # Get current theme for line color
         theme = self.theme['night'] if self.is_night_mode else self.theme['day']
         
+        # Generate junction name (A, B, C, ... Z, AA, AB, etc.)
+        junction_name = self.get_junction_name()
+        
         # Draw each line in the template as two-way roads
         for line_points in template_lines:
             # Convert world coords to screen coords
@@ -1144,6 +2106,7 @@ class GraphPaper(tk.Tk):
             shape = {
                 'type': 'junction',
                 'junction_type': self.selected_junction_type,
+                'junction_name': junction_name,
                 'points': line_points,
                 'id': cid,
                 'road_config': {
@@ -1153,14 +2116,32 @@ class GraphPaper(tk.Tk):
             }
             self.shapes.append(shape)
         
+        # Draw junction label at center (scaled)
+        sx, sy = self.world_to_screen(x, y)
+        label_offset = 40 * self.scale
+        font_size = max(8, int(10 * self.scale))
+        label_text = f"Junction {junction_name}"
+        text_color = theme['text']
+        label_id = self.canvas.create_text(sx, sy - label_offset, text=label_text, 
+                                          fill=text_color, font=('Arial', font_size, 'bold'),
+                                          tags='junction_label')
+        self.junction_labels[junction_name] = {
+            'text_id': label_id,
+            'position': (x, y),
+            'name': junction_name
+        }
+        
         # Install pre-configured traffic lights for this junction
         self.install_junction_traffic_lights(self.selected_junction_type, x, y, template_lines)
         
-        print(f"Placed {self.selected_junction_type} at ({x}, {y})")
+        print(f"Placed {self.selected_junction_type} at ({x}, {y}) - Junction {junction_name}")
 
     def install_junction_traffic_lights(self, junction_type, center_x, center_y, template_lines):
         """Automatically install traffic lights on junction nodes with coordinated timing."""
         import time
+        
+        print(f"Installing traffic lights for {junction_type} at center ({center_x}, {center_y})")
+        print(f"Total shapes in system: {len(self.shapes)}")
         
         if junction_type == 'Crossroads':
             # Crossroads has 4 arms meeting at center
@@ -1230,14 +2211,20 @@ class GraphPaper(tk.Tk):
                     offset_x = perpendicular_offset_x if light_num == 0 else -perpendicular_offset_x
                     offset_y = perpendicular_offset_y if light_num == 0 else -perpendicular_offset_y
                     
-                    # Draw traffic light
+                    # Draw traffic light (scaled)
                     sx, sy = self.world_to_screen(*pos)
-                    sx += offset_x
-                    sy += offset_y
+                    sx += offset_x * self.scale
+                    sy += offset_y * self.scale
+                    
+                    # Scale the sizes
+                    outer_radius = 10 * self.scale
+                    inner_radius = 8 * self.scale
+                    border_width = max(1, int(2 * self.scale))
                     
                     # Draw border (outer circle)
-                    border_id = self.canvas.create_oval(sx - 10, sy - 10, sx + 10, sy + 10, 
-                                                       fill='black', outline='black', width=2, tags='marker')
+                    border_id = self.canvas.create_oval(sx - outer_radius, sy - outer_radius, 
+                                                       sx + outer_radius, sy + outer_radius, 
+                                                       fill='black', outline='black', width=border_width, tags='marker')
                     
                     # Determine initial color based on phase
                     # Phase A starts with green (0-10s), Phase B starts with red (wait for Phase A)
@@ -1249,7 +2236,8 @@ class GraphPaper(tk.Tk):
                         state_index = 2  # red
                     
                     # Draw inner light
-                    light_id = self.canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, 
+                    light_id = self.canvas.create_oval(sx - inner_radius, sy - inner_radius, 
+                                                      sx + inner_radius, sy + inner_radius, 
                                                       fill=initial_color, outline='', tags='marker')
                     
                     # Generate unique ID for this light
@@ -1365,18 +2353,25 @@ class GraphPaper(tk.Tk):
                     wx, wy = marker_data['world_pos']
                     sx, sy = self.world_to_screen(wx, wy)
                     
-                    # Apply perpendicular offset
+                    # Apply perpendicular offset (scaled)
                     offset_x, offset_y = marker_data.get('perpendicular_offset', (0, 15))
-                    sx += offset_x
-                    sy += offset_y
+                    sx += offset_x * self.scale
+                    sy += offset_y * self.scale
+                    
+                    # Scale the sizes
+                    outer_radius = 10 * self.scale
+                    inner_radius = 8 * self.scale
+                    border_width = max(1, int(2 * self.scale))
                     
                     # Redraw border (outer circle)
-                    border_id = self.canvas.create_oval(sx - 10, sy - 10, sx + 10, sy + 10, 
-                                                       fill='black', outline='black', width=2, tags='marker')
+                    border_id = self.canvas.create_oval(sx - outer_radius, sy - outer_radius, 
+                                                       sx + outer_radius, sy + outer_radius, 
+                                                       fill='black', outline='black', width=border_width, tags='marker')
                     
                     # Redraw light with current color (inner circle)
                     current_color = marker_data.get('current_color', 'green')
-                    light_id = self.canvas.create_oval(sx - 8, sy - 8, sx + 8, sy + 8, 
+                    light_id = self.canvas.create_oval(sx - inner_radius, sy - inner_radius, 
+                                                      sx + inner_radius, sy + inner_radius, 
                                                       fill=current_color, outline='', tags='marker')
                     
                     # Update stored IDs
@@ -1388,22 +2383,46 @@ class GraphPaper(tk.Tk):
                 wx, wy = markers['ped_crossing']['world_pos']
                 sx, sy = self.world_to_screen(wx, wy)
                 
-                # Apply vertical offset to avoid obstructing traffic lights
+                # Apply vertical offset to avoid obstructing traffic lights (scaled)
                 ped_offset_y = markers['ped_crossing'].get('offset_y', 25)
-                sy += ped_offset_y
+                sy += ped_offset_y * self.scale
+                
+                # Scale the sizes
+                housing_width = 10 * self.scale
+                housing_height = 6 * self.scale
+                light_radius = 4 * self.scale
+                border_width = max(1, int(2 * self.scale))
                 
                 # Redraw housing (white rectangle)
-                housing_id = self.canvas.create_rectangle(sx - 10, sy - 6, sx + 10, sy + 6, 
-                                                         fill='white', outline='black', width=2, tags='marker')
+                housing_id = self.canvas.create_rectangle(sx - housing_width, sy - housing_height, 
+                                                         sx + housing_width, sy + housing_height, 
+                                                         fill='white', outline='black', width=border_width, tags='marker')
                 
                 # Redraw pedestrian light with current color
                 current_color = markers['ped_crossing'].get('current_color', 'red')
-                ped_light_id = self.canvas.create_oval(sx - 4, sy - 3, sx + 4, sy + 3, 
+                ped_light_id = self.canvas.create_oval(sx - light_radius, sy - light_radius, 
+                                                      sx + light_radius, sy + light_radius, 
                                                       fill=current_color, outline='', tags='marker')
                 
                 # Update stored IDs
                 markers['ped_crossing']['housing_id'] = housing_id
                 markers['ped_crossing']['light_id'] = ped_light_id
+        
+        # Redraw junction labels
+        self.canvas.delete('junction_label')
+        for junction_name, label_data in self.junction_labels.items():
+            wx, wy = label_data['position']
+            sx, sy = self.world_to_screen(wx, wy)
+            
+            # Scale the label offset and font size
+            label_offset = 40 * self.scale
+            font_size = max(8, int(10 * self.scale))
+            
+            label_text = f"Junction {junction_name}"
+            text_id = self.canvas.create_text(sx, sy - label_offset, text=label_text,
+                                             fill=theme['text'], font=('Arial', font_size, 'bold'),
+                                             tags='junction_label')
+            label_data['text_id'] = text_id
 
     def flatten(self, pts):
         out = []
@@ -1451,6 +2470,15 @@ class GraphPaper(tk.Tk):
             # Add pedestrian crossing to nearest road point
             self.add_pedestrian_crossing(x, y)
             self._dragging = False
+            return
+        
+        elif self.tool == 'spawn_vehicle':
+            # Spawn vehicle at clicked node
+            self.spawn_vehicle_at_node(x, y)
+            self._dragging = False
+            # Return to pen mode after spawning
+            self.tool = 'pen'
+            self.status.config(text='Tool: %s | Grid: %d' % (self.tool, self.grid_size))
             return
 
         elif self.tool == 'erase':
@@ -1537,7 +2565,7 @@ class GraphPaper(tk.Tk):
         if self.current and self.current['type'] in ['poly', 'line']:
             shape = self.current
             # Show dialog for road configuration
-            dialog = RoadConfigDialog(self, shape['type'])
+            dialog = RoadConfigDialog(self, shape['type'], shape['points'])
             
             if dialog.result:
                 # Store road configuration in shape
@@ -1547,7 +2575,7 @@ class GraphPaper(tk.Tk):
                 # If cancelled, still keep the road but with default config
                 shape['road_config'] = {
                     'road_type': 'two_way',
-                    'directions': ['North', 'South']
+                    'detected_direction': 'Unknown'
                 }
                 print("Road configuration cancelled, using defaults")
         
@@ -1601,6 +2629,53 @@ class GraphPaper(tk.Tk):
         self.draw_grid()
 
 if __name__ == '__main__':
+    multiprocessing.freeze_support()  # Required for Windows
     app = GraphPaper()
-    app.mainloop()
+    
+    # Cleanup on exit
+    def on_closing():
+        print("Closing application...")
+        try:
+            # Stop simulation and set stop event
+            app.simulation_running = False
+            app.stop_event.set()
+            
+            # Clear all vehicles and terminate processes
+            for vehicle_id, vehicle_data in list(app.vehicles.items()):
+                try:
+                    process = vehicle_data['process']
+                    if process.is_alive():
+                        print(f"Terminating vehicle {vehicle_id} process...")
+                        process.terminate()
+                        process.join(timeout=0.5)
+                        
+                        # If still alive, kill it
+                        if process.is_alive():
+                            print(f"Force killing vehicle {vehicle_id} process...")
+                            process.kill()
+                            process.join(timeout=0.5)
+                except Exception as e:
+                    print(f"Error stopping vehicle {vehicle_id}: {e}")
+            
+            # Clear the vehicles dictionary
+            app.vehicles.clear()
+            
+            print("All processes terminated. Exiting...")
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+        finally:
+            # Destroy the window and quit
+            app.quit()
+            try:
+                app.destroy()
+            except:
+                pass
+    
+    app.protocol("WM_DELETE_WINDOW", on_closing)
+    
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        print("\nKeyboard interrupt detected")
+        on_closing()
 

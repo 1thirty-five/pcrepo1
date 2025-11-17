@@ -5,6 +5,7 @@ import multiprocessing
 from multiprocessing import Process, Queue, Manager
 import time
 import random
+import sys
 
 DEFAULT_GRID = 32
 
@@ -27,8 +28,23 @@ def vehicle_movement_process(vehicle_id, path_points, speed, position_queue, tra
     def is_near_junction(position):
         """Check if position is within any junction zone."""
         px, py = position
-        tolerance = grid_size * 1.5  # Junction zone radius
-        for jx, jy in junction_positions:
+        for junction_info in junction_positions:
+            if isinstance(junction_info, dict):
+                jx, jy = junction_info['position']
+                jtype = junction_info.get('type', 'regular')
+                
+                # Roundabouts need larger tolerance to cover exit positions
+                # Exit distance = octagon_radius + grid_size = 3*grid_size
+                # Need large tolerance to ensure vehicles ignore ALL lights while inside/exiting
+                if jtype == 'Roundabout':
+                    tolerance = grid_size * 5.0  # Very large to cover entire roundabout + exits
+                else:
+                    tolerance = grid_size * 1.5
+            else:
+                # Legacy format: just position tuple
+                jx, jy = junction_info
+                tolerance = grid_size * 1.5
+            
             dist = math.sqrt((px - jx)**2 + (py - jy)**2)
             if dist < tolerance:
                 return True
@@ -49,7 +65,14 @@ def vehicle_movement_process(vehicle_id, path_points, speed, position_queue, tra
         current_pos = (x, y)
         
         # Check if we're inside a junction zone
+        was_inside = inside_junction
         inside_junction = is_near_junction(current_pos)
+        
+        # Debug: print when entering/exiting junction zone
+        if inside_junction and not was_inside:
+            print(f"Vehicle {vehicle_id} entered junction zone")
+        elif not inside_junction and was_inside:
+            print(f"Vehicle {vehicle_id} exited junction zone")
         
         # Check traffic light status only if NOT inside a junction
         if not inside_junction:
@@ -381,6 +404,246 @@ class VehicleRouteDialog(tk.Toplevel):
         self.destroy()
 
 
+class RoundaboutConfigDialog(tk.Toplevel):
+    """Dialog to configure roundabout properties."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title('Roundabout Configuration')
+        self.result = None
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center dialog
+        self.geometry('300x250')
+        
+        tk.Label(self, text='Roundabout Settings', font=('Arial', 12, 'bold')).pack(pady=10)
+        
+        # Exit count selection
+        tk.Label(self, text='Number of Exits:', font=('Arial', 10)).pack(pady=(10, 5))
+        self.exit_count_var = tk.IntVar(value=4)
+        
+        exit_frame = tk.Frame(self)
+        exit_frame.pack(pady=5)
+        tk.Radiobutton(exit_frame, text='4 Exits (N, E, S, W)', variable=self.exit_count_var, 
+                      value=4).pack(anchor='w')
+        tk.Radiobutton(exit_frame, text='8 Exits (All Directions)', variable=self.exit_count_var, 
+                      value=8).pack(anchor='w')
+        
+        # Direction selection
+        tk.Label(self, text='Traffic Direction:', font=('Arial', 10)).pack(pady=(10, 5))
+        self.direction_var = tk.StringVar(value='clockwise')
+        
+        dir_frame = tk.Frame(self)
+        dir_frame.pack(pady=5)
+        tk.Radiobutton(dir_frame, text='Clockwise', variable=self.direction_var, 
+                      value='clockwise').pack(anchor='w')
+        tk.Radiobutton(dir_frame, text='Counter-Clockwise', variable=self.direction_var, 
+                      value='counterclockwise').pack(anchor='w')
+        
+        # Buttons
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=15)
+        tk.Button(btn_frame, text='OK', command=self.ok_clicked, width=10).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Cancel', command=self.cancel_clicked, width=10).pack(side='left', padx=5)
+        
+        # Bind keyboard shortcuts
+        self.bind('<Return>', lambda e: self.ok_clicked())
+        self.bind('<Escape>', lambda e: self.cancel_clicked())
+        
+        # Wait for dialog to close
+        self.wait_window()
+    
+    def ok_clicked(self):
+        """Save configuration and close."""
+        self.result = {
+            'exit_count': self.exit_count_var.get(),
+            'direction': self.direction_var.get()
+        }
+        print(f"OK clicked - exit_count: {self.result['exit_count']}, dir: {self.result['direction']}")
+        self.destroy()
+    
+    def cancel_clicked(self):
+        """Close dialog without saving."""
+        self.result = None
+        self.destroy()
+
+
+class ShortestRouteDialog(tk.Toplevel):
+    """Dialog to configure shortest route calculation."""
+    def __init__(self, parent, junction_names):
+        super().__init__(parent)
+        self.title('Shortest Route Calculator')
+        self.result = None
+        self.junction_names = junction_names
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center dialog
+        self.geometry('450x300')
+        
+        tk.Label(self, text='Calculate Shortest Route', font=('Arial', 14, 'bold')).pack(pady=(10, 5))
+        
+        # Instructions
+        instruction_text = ('Find the fastest route between two junctions.\n'
+                          'System will test all possible paths considering traffic light timing.')
+        tk.Label(self, text=instruction_text, font=('Arial', 9), wraplength=400, justify='left').pack(pady=5)
+        
+        # Start junction frame
+        start_frame = tk.Frame(self)
+        start_frame.pack(pady=15, padx=20, fill='x')
+        
+        tk.Label(start_frame, text='Start Junction:', font=('Arial', 10, 'bold')).pack(anchor='w')
+        
+        self.start_var = tk.StringVar()
+        if junction_names:
+            self.start_var.set(junction_names[0])
+        
+        self.start_combo = tk.OptionMenu(start_frame, self.start_var, *junction_names)
+        self.start_combo.config(width=30)
+        self.start_combo.pack(pady=5, fill='x')
+        
+        # Destination junction frame
+        dest_frame = tk.Frame(self)
+        dest_frame.pack(pady=15, padx=20, fill='x')
+        
+        tk.Label(dest_frame, text='Destination Junction:', font=('Arial', 10, 'bold')).pack(anchor='w')
+        
+        self.dest_var = tk.StringVar()
+        if len(junction_names) > 1:
+            self.dest_var.set(junction_names[1])
+        elif junction_names:
+            self.dest_var.set(junction_names[0])
+        
+        self.dest_combo = tk.OptionMenu(dest_frame, self.dest_var, *junction_names)
+        self.dest_combo.config(width=30)
+        self.dest_combo.pack(pady=5, fill='x')
+        
+        # Buttons
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=20)
+        tk.Button(btn_frame, text='Calculate', command=self.ok_clicked, width=12).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Cancel', command=self.cancel_clicked, width=12).pack(side='left', padx=5)
+        
+        # Bind keyboard shortcuts
+        self.bind('<Return>', lambda e: self.ok_clicked())
+        self.bind('<Escape>', lambda e: self.cancel_clicked())
+        
+        # Wait for dialog to close
+        self.wait_window()
+    
+    def ok_clicked(self):
+        """Save configuration and close."""
+        start = self.start_var.get().strip()
+        dest = self.dest_var.get().strip()
+        
+        if not start or not dest:
+            tk.messagebox.showwarning("Invalid Input", "Please select both start and destination junctions.")
+            return
+        
+        if start == dest:
+            tk.messagebox.showwarning("Invalid Input", "Start and destination must be different junctions.")
+            return
+        
+        self.result = {
+            'start': start,
+            'destination': dest
+        }
+        self.destroy()
+    
+    def cancel_clicked(self):
+        """Close dialog without saving."""
+        self.result = None
+        self.destroy()
+
+
+class RoundaboutConfigDialog(tk.Toplevel):
+    """Dialog to configure roundabout exits (4 or 8) and direction."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.title('Roundabout Configuration')
+        self.result = None
+        
+        # Make dialog modal
+        self.transient(parent)
+        self.grab_set()
+        
+        # Center dialog
+        self.geometry('450x350')
+        
+        tk.Label(self, text='Roundabout Configuration', font=('Arial', 14, 'bold')).pack(pady=(20, 10))
+        
+        # Description
+        desc_text = 'Choose the number of exits for the roundabout:'
+        tk.Label(self, text=desc_text, font=('Arial', 10)).pack(pady=10)
+        
+        # Exit options with timing info
+        tk.Label(self, text='4 Exits: N, E, S, W (20-second cycle)', 
+                font=('Arial', 9), fg='#555').pack(pady=5)
+        tk.Label(self, text='8 Exits: N, NE, E, SE, S, SW, W, NW (24-second cycle)', 
+                font=('Arial', 9), fg='#555').pack(pady=5)
+        
+        # Radio buttons for exit count
+        self.exit_count = tk.IntVar(value=4)
+        
+        radio_frame = tk.Frame(self)
+        radio_frame.pack(pady=15)
+        
+        tk.Radiobutton(radio_frame, text='4 Exits', variable=self.exit_count, 
+                      value=4, font=('Arial', 11)).pack(side='left', padx=12)
+        tk.Radiobutton(radio_frame, text='8 Exits', variable=self.exit_count, 
+                      value=8, font=('Arial', 11)).pack(side='left', padx=12)
+        
+        # Direction options
+        tk.Label(self, text='Traffic flow direction:', font=('Arial', 10)).pack(pady=(15, 5))
+        
+        self.direction = tk.StringVar(value='clockwise')
+        
+        direction_frame = tk.Frame(self)
+        direction_frame.pack(pady=10)
+        
+        tk.Radiobutton(direction_frame, text='Clockwise (US/Right-hand traffic)', 
+                      variable=self.direction, value='clockwise', 
+                      font=('Arial', 10)).pack(side='left', padx=15)
+        tk.Radiobutton(direction_frame, text='Counter-clockwise (UK/Left-hand traffic)', 
+                      variable=self.direction, value='counterclockwise', 
+                      font=('Arial', 10)).pack(side='left', padx=15)
+        
+        # Buttons
+        btn_frame = tk.Frame(self)
+        btn_frame.pack(pady=20)
+        tk.Button(btn_frame, text='OK', command=self.ok_clicked, width=10).pack(side='left', padx=5)
+        tk.Button(btn_frame, text='Cancel', command=self.cancel_clicked, width=10).pack(side='left', padx=5)
+        
+        # Bind keyboard shortcuts
+        self.bind('<Return>', lambda e: self.ok_clicked())
+        self.bind('<Escape>', lambda e: self.cancel_clicked())
+        
+        # Wait for dialog to close
+        self.wait_window()
+    
+    def ok_clicked(self):
+        """Store result and close dialog."""
+        # Store both exit count and rotation direction
+        print(f"OK clicked - exit_count: {self.exit_count.get()}, dir: {self.direction.get()}")
+        self.result = {
+            'exit_count': self.exit_count.get(),
+            'direction': self.direction.get()
+        }
+        self.grab_release()
+        self.destroy()
+    
+    def cancel_clicked(self):
+        """Close dialog without saving."""
+        print("Cancel clicked")
+        self.result = None
+        self.grab_release()
+        self.destroy()
+
+
 class GraphPaper(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -514,7 +777,7 @@ class GraphPaper(tk.Tk):
         self.junctions_frame = tk.Frame(self.edit_roads_frame)
         self.junctions_buttons = []
         
-        junction_types = ['T-Section', 'Crossroads', 'Y-Intersection', 'Roundabout', 'Ramp Merge']
+        junction_types = ['T-Section', 'Crossroads', 'Y-Intersection', 'Roundabout', 'Ramp Merge', 'Landmark']
         for jtype in junction_types:
             jb = tk.Button(self.junctions_frame, text=jtype, 
                           command=lambda jt=jtype: self.select_junction(jt),
@@ -621,6 +884,15 @@ class GraphPaper(tk.Tk):
         clear_vehicles_btn.pack(side='left', padx=2)
         self.simulation_buttons.append(clear_vehicles_btn)
         self.buttons.append(clear_vehicles_btn)
+        
+        # Shortest Route button
+        shortest_route_btn = tk.Button(self.simulation_frame, text='Shortest Route', 
+                                       command=self.find_shortest_route,
+                                       relief='flat', bd=0, padx=12, pady=6,
+                                       highlightthickness=0, borderwidth=0)
+        shortest_route_btn.pack(side='left', padx=2)
+        self.simulation_buttons.append(shortest_route_btn)
+        self.buttons.append(shortest_route_btn)
         
         # theme toggle button - placed on the right side
         self.theme_btn = tk.Button(self.toolbar, text='🌙', command=self.toggle_theme,
@@ -1209,43 +1481,83 @@ class GraphPaper(tk.Tk):
                     
                     # Get timing for current color
                     timing = state['timing']
-                    current_color = state['state']
-                    duration = timing[current_color]  # Duration in seconds
                     
-                    # Check if enough time has passed
-                    elapsed = current_time - state['last_change']
-                    if elapsed >= duration:
-                        # For coordinated junction lights, calculate phase-based timing
-                        if 'phase' in state:
-                            # Determine next color based on phase coordination
-                            # Phase cycle: Green -> Yellow -> Red -> Green
-                            if current_color == 'green':
-                                new_color = 'yellow'
-                                new_index = 1
-                            elif current_color == 'yellow':
-                                new_color = 'red'
-                                new_index = 2
-                            else:  # red
-                                new_color = 'green'
-                                new_index = 0
+                    # For coordinated lights with phase offset, calculate color based on cycle position
+                    if 'phase_offset' in state and 'cycle_time' in state:
+                        cycle_time = state['cycle_time']
+                        phase_offset = state['phase_offset']
+                        green_time = timing['green']
+                        yellow_time = timing['yellow']
+                        
+                        # Calculate position in cycle
+                        elapsed_in_cycle = (current_time % cycle_time)
+                        time_in_phase = elapsed_in_cycle - phase_offset
+                        if time_in_phase < 0:
+                            time_in_phase += cycle_time
+                        
+                        # Determine color based on position in phase
+                        if time_in_phase < green_time:
+                            new_color = 'green'
+                            new_index = 0
+                        elif time_in_phase < green_time + yellow_time:
+                            new_color = 'yellow'
+                            new_index = 1
                         else:
-                            # Regular cycling for non-coordinated lights
-                            state['state_index'] = (state['state_index'] + 1) % 3
-                            new_color = self.traffic_light_colors[state['state_index']]
-                            new_index = state['state_index']
+                            new_color = 'red'
+                            new_index = 2
                         
-                        state['state'] = new_color
-                        state['state_index'] = new_index
-                        state['last_change'] = current_time
+                        # Only update if color changed
+                        if new_color != state['state']:
+                            state['state'] = new_color
+                            state['state_index'] = new_index
+                            
+                            # Update the traffic light color on canvas
+                            marker_key = state['marker_key']
+                            light_key = state['light_key']
+                            
+                            if marker_key in self.node_markers and light_key in self.node_markers[marker_key]:
+                                light_id_canvas = self.node_markers[marker_key][light_key]['light_id']
+                                self.canvas.itemconfig(light_id_canvas, fill=new_color)
+                                self.node_markers[marker_key][light_key]['current_color'] = new_color
+                    else:
+                        # Original timing logic for non-phase-coordinated lights
+                        current_color = state['state']
+                        duration = timing[current_color]  # Duration in seconds
                         
-                        # Update the traffic light color on canvas
-                        marker_key = state['marker_key']
-                        light_key = state['light_key']
-                        
-                        if marker_key in self.node_markers and light_key in self.node_markers[marker_key]:
-                            light_id_canvas = self.node_markers[marker_key][light_key]['light_id']
-                            self.canvas.itemconfig(light_id_canvas, fill=new_color)
-                            self.node_markers[marker_key][light_key]['current_color'] = new_color
+                        # Check if enough time has passed
+                        elapsed = current_time - state['last_change']
+                        if elapsed >= duration:
+                            # For coordinated junction lights, calculate phase-based timing
+                            if 'phase' in state:
+                                # Determine next color based on phase coordination
+                                # Phase cycle: Green -> Yellow -> Red -> Green
+                                if current_color == 'green':
+                                    new_color = 'yellow'
+                                    new_index = 1
+                                elif current_color == 'yellow':
+                                    new_color = 'red'
+                                    new_index = 2
+                                else:  # red
+                                    new_color = 'green'
+                                    new_index = 0
+                            else:
+                                # Regular cycling for non-coordinated lights
+                                state['state_index'] = (state['state_index'] + 1) % 3
+                                new_color = self.traffic_light_colors[state['state_index']]
+                                new_index = state['state_index']
+                            
+                            state['state'] = new_color
+                            state['state_index'] = new_index
+                            state['last_change'] = current_time
+                            
+                            # Update the traffic light color on canvas
+                            marker_key = state['marker_key']
+                            light_key = state['light_key']
+                            
+                            if marker_key in self.node_markers and light_key in self.node_markers[marker_key]:
+                                light_id_canvas = self.node_markers[marker_key][light_key]['light_id']
+                                self.canvas.itemconfig(light_id_canvas, fill=new_color)
+                                self.node_markers[marker_key][light_key]['current_color'] = new_color
         
         # Update all pedestrian crossings with inverse logic
         # When traffic light is green or yellow, pedestrian is red
@@ -1419,7 +1731,23 @@ class GraphPaper(tk.Tk):
         for junction_name, label_data in self.junction_labels.items():
             jx, jy = label_data['position']
             dist = math.sqrt((point[0] - jx)**2 + (point[1] - jy)**2)
-            if dist < tolerance:
+            
+            # For roundabouts, check if point is near any exit position
+            if label_data.get('junction_type') == 'Roundabout':
+                g = self.grid_size
+                octagon_radius = 2 * g
+                exit_distance = octagon_radius + g
+                
+                # Check each exit position
+                for i in range(8):
+                    ang = math.radians(i * 45 - 90)
+                    ex = jx + exit_distance * math.cos(ang)
+                    ey = jy + exit_distance * math.sin(ang)
+                    exit_dist = math.sqrt((point[0] - ex)**2 + (point[1] - ey)**2)
+                    if exit_dist < tolerance:
+                        return junction_name
+            elif dist < tolerance:
+                # For regular junctions, check distance to center
                 return junction_name
         
         return None
@@ -1473,6 +1801,7 @@ class GraphPaper(tk.Tk):
         current_endpoint = path_points[-1]
         prev_point = path_points[-2] if len(path_points) >= 2 else None
         visited_shapes = {id(start_shape)}
+        processed_junctions = set()  # Track junctions we've already processed
         
         command_index = 0
         max_extensions = 30
@@ -1482,7 +1811,7 @@ class GraphPaper(tk.Tk):
             # Check if we're at a junction
             junction_name = self.get_junction_at_point(current_endpoint)
             
-            if junction_name and command_index < len(route_commands):
+            if junction_name and command_index < len(route_commands) and junction_name not in processed_junctions:
                 # Check if this is the junction mentioned in the next command
                 next_command = route_commands[command_index]
                 
@@ -1493,6 +1822,121 @@ class GraphPaper(tk.Tk):
                     
                     # Get all possible exits
                     exit_roads = self.get_exit_roads_from_junction(current_endpoint, prev_point)
+
+                    # Special handling for Roundabout: route vehicles around octagon ring
+                    jl = self.junction_labels.get(junction_name)
+                    if jl and jl.get('junction_type') == 'Roundabout':
+                        print(f"DEBUG: Entering roundabout routing for Junction {junction_name}")
+                        # Build roundabout-specific path: follow octagon vertices between incoming and desired exit
+                        center_x, center_y = jl['position']
+                        g = self.grid_size
+                        octagon_radius = 2 * g
+                        exit_distance = octagon_radius + g
+
+                        # Build list of exit outer positions in same indexing as template (i*45 -90)
+                        exit_positions = []
+                        for i in range(8):
+                            ang = math.radians(i * 45 - 90)
+                            px = center_x + exit_distance * math.cos(ang)
+                            py = center_y + exit_distance * math.sin(ang)
+                            exit_positions.append((px, py))
+
+                        # Map compass to index
+                        compass_to_index = {'N':0,'NE':1,'E':2,'SE':3,'S':4,'SW':5,'W':6,'NW':7}
+
+                        # Determine desired index
+                        desired_index = None
+                        if direction_type == 'absolute':
+                            want = desired_direction.upper()
+                            print(f"  Looking for direction: '{want}'")
+                            desired_index = compass_to_index.get(want)
+                            print(f"  Mapped to index: {desired_index}")
+                            # If 4-exit roundabout, snap to nearest cardinal (0,2,4,6)
+                            if jl.get('roundabout_exit_count') == 4 and desired_index is not None:
+                                cardinals = [0,2,4,6]
+                                best = min(cardinals, key=lambda c: min((desired_index - c) % 8, (c - desired_index) % 8))
+                                desired_index = best
+                                print(f"  4-exit roundabout: snapped to cardinal index {desired_index}")
+                        else:
+                            # Relative routing: will pick next exit later
+                            pass
+
+                        # Find incoming index by finding the closest exit position to current_endpoint
+                        # This tells us which road the vehicle is entering from
+                        incoming_index = 0
+                        min_dist = float('inf')
+                        for i, exit_pos in enumerate(exit_positions):
+                            dist = math.sqrt((current_endpoint[0] - exit_pos[0])**2 + 
+                                           (current_endpoint[1] - exit_pos[1])**2)
+                            if dist < min_dist:
+                                min_dist = dist
+                                incoming_index = i
+                        
+                        print(f"  Current endpoint: {current_endpoint}, closest to exit index {incoming_index} (dist: {min_dist:.1f})")
+
+                        # If desired_index is still None (relative), pick next exit
+                        if desired_index is None:
+                            desired_index = (incoming_index + (2 if jl.get('roundabout_exit_count') == 4 else 1)) % 8
+                        
+                        # Make sure we don't exit at the same place we entered
+                        if incoming_index == desired_index:
+                            print(f"Warning: desired exit same as entrance! Adjusting to next exit.")
+                            desired_index = (incoming_index + (2 if jl.get('roundabout_exit_count') == 4 else 1)) % 8
+
+                        # Determine rotation sign from stored junction config (CW -> +1, CCW -> -1)
+                        rot = jl.get('roundabout_direction', 'clockwise')
+                        
+                        print(f"Roundabout: entering at index {incoming_index}, exiting at index {desired_index}, direction: {rot}")
+                        if rot == 'clockwise' or rot == 'CW':
+                            sign = 1
+                        else:
+                            sign = -1
+
+                        step = 1 if jl.get('roundabout_exit_count') == 8 else 2
+
+                        # Build octagon vertex positions
+                        vertex_positions = []
+                        for i in range(8):
+                            angv = math.radians(i * 45 - 90)
+                            vx = center_x + octagon_radius * math.cos(angv)
+                            vy = center_y + octagon_radius * math.sin(angv)
+                            vertex_positions.append((vx, vy))
+
+                        # Start from incoming vertex and traverse to desired exit
+                        traversal_indices = [incoming_index]
+                        idx = incoming_index
+                        while idx != desired_index:
+                            idx = (idx + sign * step) % 8
+                            traversal_indices.append(idx)
+                        
+                        # Debug: show direction names for indices
+                        index_names = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']
+                        traversal_names = [index_names[i] for i in traversal_indices]
+                        print(f"  Traversal path: {' -> '.join(traversal_names)} (indices: {traversal_indices})")
+
+                        # Add vertex positions to path_points
+                        for vi in traversal_indices:
+                            path_points.append(vertex_positions[vi])
+
+                        # Add the exit outer point for desired_index
+                        path_points.append(exit_positions[desired_index])
+
+                        # After adding exit outer point, continue on connected roads from that endpoint
+                        prev_point = path_points[-2] if len(path_points) >= 2 else None
+                        current_endpoint = path_points[-1]
+                        print(f"  Looking for connected road at exit position: {current_endpoint}")
+                        found = self.continue_on_connected_road(path_points, current_endpoint, visited_shapes, prev_point)
+                        if found:
+                            # Update to new endpoint after extending path
+                            prev_point = current_endpoint
+                            current_endpoint = path_points[-1]
+                            print(f"  Found connected road, new endpoint: {current_endpoint}")
+                        else:
+                            print(f"  WARNING: No connected road found at exit!")
+                        command_index += 1
+                        processed_junctions.add(junction_name)  # Mark this junction as processed
+                        extensions += 1
+                        continue
                     
                     if not exit_roads:
                         print(f"No exit roads found at Junction {junction_name}")
@@ -1559,6 +2003,7 @@ class GraphPaper(tk.Tk):
                                 current_endpoint = path_points[-1]
                                 visited_shapes.add(id(shape))
                                 command_index += 1
+                                processed_junctions.add(junction_name)  # Mark as processed
                             else:
                                 # Try reversed direction
                                 new_points = list(reversed(shape['points'][:start_idx]))
@@ -1568,6 +2013,7 @@ class GraphPaper(tk.Tk):
                                     current_endpoint = path_points[-1]
                                     visited_shapes.add(id(shape))
                                     command_index += 1
+                                    processed_junctions.add(junction_name)  # Mark as processed
                                 else:
                                     break
                         else:
@@ -1707,6 +2153,7 @@ class GraphPaper(tk.Tk):
         # Build path using route commands (if custom) or auto (if skip)
         if route_commands:
             path_points = self.build_vehicle_path_with_route(nearest_shape, point_index, route_commands)
+            print(f"Built path with {len(path_points)} points using route commands")
         else:
             path_points = self.build_vehicle_path(nearest_shape, point_index)
         
@@ -1735,8 +2182,17 @@ class GraphPaper(tk.Tk):
         speed = random.uniform(1.0, 3.0)  # Random speed in pixels per update
         
         # Collect all junction positions for the vehicle process
-        junction_positions = [(data['position'][0], data['position'][1]) 
-                             for data in self.junction_labels.values()]
+        # For roundabouts, need larger detection radius
+        junction_positions = []
+        for name, data in self.junction_labels.items():
+            pos = (data['position'][0], data['position'][1])
+            jtype = data.get('junction_type', 'regular')
+            # Store junction info with type for proper zone detection
+            junction_positions.append({
+                'position': pos,
+                'type': jtype,
+                'grid_size': self.grid_size
+            })
         
         # Create process but DON'T start it yet - wait for simulation to start
         process = Process(target=vehicle_movement_process,
@@ -1824,6 +2280,421 @@ class GraphPaper(tk.Tk):
         if hasattr(self, 'sim_control_btn'):
             self.sim_control_btn.config(text='Start Simulation')
     
+    def find_shortest_route(self):
+        """Calculate shortest route considering traffic light timing."""
+        # Get junction names
+        junction_names = list(self.junction_labels.keys())
+        
+        # Show dialog
+        dialog = ShortestRouteDialog(self, junction_names)
+        
+        if not dialog.result:
+            print("Shortest route calculation cancelled")
+            return
+        
+        start_junction = dialog.result['start']
+        dest_junction = dialog.result['destination']
+        
+        print(f"\nCalculating shortest route from Junction {start_junction} to Junction {dest_junction}...")
+        
+        # Get junction positions
+        if start_junction not in self.junction_labels or dest_junction not in self.junction_labels:
+            tk.messagebox.showerror("Invalid Input", "Selected junctions not found.")
+            return
+        
+        # Find all possible routes between junctions
+        routes = self.find_all_junction_routes(start_junction, dest_junction)
+        
+        if not routes:
+            tk.messagebox.showinfo("No Routes Found", 
+                                  "No valid routes found between the specified junctions.")
+            return
+        
+        # Simulate each route and calculate travel time
+        print(f"Found {len(routes)} possible routes. Simulating...")
+        route_times = []
+        
+        for i, route in enumerate(routes):
+            travel_time = self.simulate_route_time(route['path'], route['commands'])
+            route_times.append({
+                'route_num': i + 1,
+                'path_description': route['description'],
+                'commands': route['commands'],
+                'travel_time': travel_time,
+                'path_points': route['path']
+            })
+            print(f"  Route {i+1}: {travel_time:.2f}s - {route['description']}")
+        
+        # Find shortest route
+        fastest_route = min(route_times, key=lambda r: r['travel_time'])
+        
+        # Display results
+        self.show_route_results(fastest_route, route_times, 
+                               f"Junction {start_junction}", f"Junction {dest_junction}")
+    
+    def find_all_junction_routes(self, start_junction, dest_junction):
+        """Find all possible routes between two junctions."""
+        routes = []
+        
+        # Get starting position from the start junction's exit roads
+        start_pos = self.junction_labels[start_junction]['position']
+        
+        # Find a road connected to the start junction to use as starting point
+        start_shape = None
+        start_idx = 0
+        tolerance = self.grid_size * 3.5  # Use large tolerance for roundabouts
+        
+        for shape in self.shapes:
+            if shape['type'] in ['line', 'poly'] and len(shape['points']) >= 2:
+                for i, point in enumerate(shape['points']):
+                    dist = math.sqrt((point[0] - start_pos[0])**2 + (point[1] - start_pos[1])**2)
+                    if dist < tolerance:
+                        start_shape = shape
+                        start_idx = i
+                        break
+                if start_shape:
+                    break
+        
+        if not start_shape:
+            print(f"No road found connected to Junction {start_junction}")
+            return []
+        
+        # Try direct route (auto-follow to destination)
+        try:
+            direct_path = self.build_vehicle_path(start_shape, start_idx)
+            # Check if path reaches destination junction
+            junctions_in_path = self.get_junctions_in_path(direct_path, dest_junction)
+            if dest_junction in junctions_in_path:
+                path_str = ' → '.join(junctions_in_path)
+                routes.append({
+                    'path': direct_path,
+                    'commands': [],
+                    'description': f'Direct route: {path_str}',
+                    'junction_path': junctions_in_path
+                })
+        except:
+            pass
+        
+        # Try routes with explicit directions at destination junction
+        for direction in ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW']:
+            command_str = f"{direction}_{dest_junction}"
+            commands = self.parse_route_instructions(command_str)
+            if commands:
+                try:
+                    path = self.build_vehicle_path_with_route(start_shape, start_idx, commands)
+                    if len(path) >= 2:
+                        junctions_in_path = self.get_junctions_in_path(path, dest_junction)
+                        path_str = ' → '.join(junctions_in_path)
+                        routes.append({
+                            'path': path,
+                            'commands': commands,
+                            'description': f'{path_str} (exit {direction})',
+                            'junction_path': junctions_in_path
+                        })
+                except Exception as e:
+                    pass
+        
+        # Try routes through intermediate junctions
+        all_junctions = list(self.junction_labels.keys())
+        intermediate_junctions = [j for j in all_junctions 
+                                  if j != start_junction and j != dest_junction]
+        
+        for mid_junction in intermediate_junctions[:5]:  # Limit to avoid too many routes
+            for dir1 in ['N', 'E', 'S', 'W']:
+                for dir2 in ['N', 'E', 'S', 'W']:
+                    command_str = f"{dir1}_{mid_junction} {dir2}_{dest_junction}"
+                    commands = self.parse_route_instructions(command_str)
+                    if commands:
+                        try:
+                            path = self.build_vehicle_path_with_route(start_shape, start_idx, commands)
+                            if len(path) >= 2:
+                                junctions_in_path = self.get_junctions_in_path(path, dest_junction)
+                                path_str = ' → '.join(junctions_in_path)
+                                routes.append({
+                                    'path': path,
+                                    'commands': commands,
+                                    'description': f'{path_str}',
+                                    'junction_path': junctions_in_path
+                                })
+                        except:
+                            pass
+        
+        print(f"Generated {len(routes)} possible routes")
+        return routes
+    
+    def get_junctions_in_path(self, path_points, dest_junction=None):
+        """Extract list of junctions that the path passes through, in order.
+        If dest_junction is provided, ensure it's included at the end."""
+        junctions_found = []
+        tolerance = self.grid_size * 5.0  # Increased to detect junctions vehicle passes near
+        
+        # Track when we enter each junction zone (use first encounter)
+        junction_encounters = {}  # {junction_name: first_index}
+        
+        for i, point in enumerate(path_points):
+            for junction_name, junction_data in self.junction_labels.items():
+                junction_pos = junction_data['position']
+                
+                dist = math.sqrt((point[0] - junction_pos[0])**2 + 
+                               (point[1] - junction_pos[1])**2)
+                
+                if dist < tolerance:
+                    if junction_name not in junction_encounters:
+                        junction_encounters[junction_name] = i
+        
+        # Sort junctions by the order they were first encountered in the path
+        sorted_junctions = sorted(junction_encounters.items(), key=lambda x: x[1])
+        junctions_found = [name for name, _ in sorted_junctions]
+        
+        # Ensure destination junction is included at the end if provided and not already there
+        if dest_junction and dest_junction not in junctions_found:
+            junctions_found.append(dest_junction)
+        
+        return junctions_found
+    
+    def path_reaches_junction(self, path_points, junction_name):
+        """Check if a path reaches a specific junction."""
+        if junction_name not in self.junction_labels:
+            return False
+        
+        junction_pos = self.junction_labels[junction_name]['position']
+        tolerance = self.grid_size * 5.0  # Increased to match get_junctions_in_path
+        
+        for point in path_points:
+            dist = math.sqrt((point[0] - junction_pos[0])**2 + 
+                           (point[1] - junction_pos[1])**2)
+            if dist < tolerance:
+                return True
+        return False
+    
+    def parse_position_input(self, input_str):
+        """Parse position input: junction name or 'N nodes DIR junction'."""
+        input_str = input_str.strip().upper()
+        
+        # Check if it's just a junction name
+        if input_str in self.junction_labels:
+            pos = self.junction_labels[input_str]['position']
+            return pos, f"Junction {input_str}"
+        
+        # Parse "N nodes DIR junction" format
+        parts = input_str.split()
+        if len(parts) >= 4 and parts[1].upper() == 'NODES':
+            try:
+                num_nodes = int(parts[0])
+                direction = parts[2].upper()
+                junction = parts[3]
+                
+                if junction not in self.junction_labels:
+                    return None, f"Junction {junction} not found"
+                
+                junction_pos = self.junction_labels[junction]['position']
+                
+                # Calculate position N nodes in specified direction
+                dir_map = {
+                    'NORTH': (0, -1), 'N': (0, -1),
+                    'SOUTH': (0, 1), 'S': (0, 1),
+                    'EAST': (1, 0), 'E': (1, 0),
+                    'WEST': (-1, 0), 'W': (-1, 0),
+                    'NORTHEAST': (1, -1), 'NE': (1, -1),
+                    'NORTHWEST': (-1, -1), 'NW': (-1, -1),
+                    'SOUTHEAST': (1, 1), 'SE': (1, 1),
+                    'SOUTHWEST': (-1, 1), 'SW': (-1, 1)
+                }
+                
+                if direction not in dir_map:
+                    return None, f"Unknown direction: {direction}"
+                
+                dx, dy = dir_map[direction]
+                # Normalize diagonal directions
+                if abs(dx) + abs(dy) == 2:
+                    dx /= 1.414
+                    dy /= 1.414
+                
+                offset_x = dx * num_nodes * self.grid_size
+                offset_y = dy * num_nodes * self.grid_size
+                
+                pos = (junction_pos[0] + offset_x, junction_pos[1] + offset_y)
+                return pos, f"{num_nodes} nodes {direction.title()} of Junction {junction}"
+                
+            except (ValueError, IndexError):
+                return None, "Invalid format"
+        
+        return None, "Invalid format"
+    
+    def find_all_routes(self, start_pos, dest_pos):
+        """Find all possible routes between two positions."""
+        # For now, implement a simple version that finds routes through each junction
+        routes = []
+        
+        # Find nearest shapes to start and dest
+        start_shape, start_idx = self.find_nearest_shape_and_point(start_pos)
+        dest_shape, dest_idx = self.find_nearest_shape_and_point(dest_pos)
+        
+        if not start_shape or not dest_shape:
+            return []
+        
+        # Try direct route (no junction commands)
+        direct_path = self.build_vehicle_path(start_shape, start_idx)
+        if direct_path:
+            routes.append({
+                'path': direct_path,
+                'commands': [],
+                'description': 'Direct route'
+            })
+        
+        # Try routes through each junction with different directions
+        junction_names = list(self.junction_labels.keys())
+        for junction in junction_names:
+            for direction in ['N', 'S', 'E', 'W']:
+                command_str = f"{direction}_{junction}"
+                commands = self.parse_route_instructions(command_str)
+                if commands:
+                    try:
+                        path = self.build_vehicle_path_with_route(start_shape, start_idx, commands)
+                        if len(path) >= 2:
+                            routes.append({
+                                'path': path,
+                                'commands': commands,
+                                'description': f'Via Junction {junction} ({direction})'
+                            })
+                    except:
+                        pass
+        
+        return routes
+    
+    def find_nearest_shape_and_point(self, position):
+        """Find nearest shape and point index to a position."""
+        min_dist = float('inf')
+        nearest_shape = None
+        nearest_index = 0
+        
+        for shape in self.shapes:
+            if shape['type'] in ['line', 'poly', 'junction'] and len(shape['points']) >= 2:
+                for i, point in enumerate(shape['points']):
+                    dist = math.sqrt((point[0] - position[0])**2 + (point[1] - position[1])**2)
+                    if dist < min_dist:
+                        min_dist = dist
+                        nearest_shape = shape
+                        nearest_index = i
+        
+        return nearest_shape, nearest_index
+    
+    def simulate_route_time(self, path_points, route_commands):
+        """Simulate travel time for a route considering traffic lights."""
+        if len(path_points) < 2:
+            return float('inf')
+        
+        # Calculate base travel time (distance / average speed)
+        total_distance = 0
+        for i in range(len(path_points) - 1):
+            dx = path_points[i+1][0] - path_points[i][0]
+            dy = path_points[i+1][1] - path_points[i][1]
+            total_distance += math.sqrt(dx*dx + dy*dy)
+        
+        average_speed = 2.0  # pixels per update (20ms per update)
+        base_time = (total_distance / average_speed) * 0.02  # seconds
+        
+        # Add traffic light delays
+        traffic_delay = 0
+        junction_positions = [(data['position'][0], data['position'][1]) 
+                             for data in self.junction_labels.values()]
+        
+        # Check each segment for traffic light encounters
+        for i in range(len(path_points) - 1):
+            point = path_points[i]
+            
+            # Check if near any traffic light
+            for marker_key, markers in self.node_markers.items():
+                for marker_id, marker_data in markers.items():
+                    if marker_id.startswith('traffic_light_'):
+                        light_pos = marker_data.get('world_pos')
+                        if light_pos:
+                            dist = math.sqrt((point[0] - light_pos[0])**2 + 
+                                           (point[1] - light_pos[1])**2)
+                            if dist < self.grid_size * 0.5:
+                                # Assume worst case: hit red light
+                                # Average wait time = half of red duration
+                                traffic_delay += 5.0  # Approximate average wait
+        
+        total_time = base_time + traffic_delay
+        return total_time
+    
+    def show_route_results(self, fastest_route, all_routes, start_desc, dest_desc):
+        """Display route calculation results in a dialog."""
+        result_window = tk.Toplevel(self)
+        result_window.title("Shortest Route Results")
+        result_window.geometry("600x500")
+        
+        # Header
+        header_frame = tk.Frame(result_window, bg='#4CAF50', height=60)
+        header_frame.pack(fill='x')
+        header_frame.pack_propagate(False)
+        
+        tk.Label(header_frame, text="✓ Shortest Route Found", 
+                font=('Arial', 16, 'bold'), bg='#4CAF50', fg='white').pack(pady=15)
+        
+        # Route info frame
+        info_frame = tk.Frame(result_window, padx=20, pady=20)
+        info_frame.pack(fill='both', expand=True)
+        
+        # Start and destination
+        tk.Label(info_frame, text=f"From: {start_desc}", 
+                font=('Arial', 11), anchor='w').pack(fill='x', pady=2)
+        tk.Label(info_frame, text=f"To: {dest_desc}", 
+                font=('Arial', 11), anchor='w').pack(fill='x', pady=2)
+        
+        tk.Label(info_frame, text="", height=1).pack()  # Spacer
+        
+        # Fastest route details
+        tk.Label(info_frame, text="Fastest Route:", 
+                font=('Arial', 12, 'bold')).pack(anchor='w', pady=(5, 2))
+        
+        # Show junction path prominently
+        junction_path = fastest_route.get('junction_path', [])
+        if junction_path:
+            path_display = ' → '.join(junction_path)
+            tk.Label(info_frame, text=f"  Path: {path_display}", 
+                    font=('Arial', 12, 'bold'), fg='#2196F3').pack(anchor='w')
+        
+        tk.Label(info_frame, text=f"  {fastest_route['path_description']}", 
+                font=('Arial', 10), fg='#666').pack(anchor='w')
+        tk.Label(info_frame, text=f"  Estimated Time: {fastest_route['travel_time']:.2f} seconds", 
+                font=('Arial', 11, 'bold'), fg='#2196F3').pack(anchor='w')
+        
+        # All routes comparison
+        tk.Label(info_frame, text="", height=1).pack()  # Spacer
+        tk.Label(info_frame, text="All Routes Comparison:", 
+                font=('Arial', 12, 'bold')).pack(anchor='w', pady=(5, 5))
+        
+        # Scrollable text for all routes
+        text_frame = tk.Frame(info_frame)
+        text_frame.pack(fill='both', expand=True, pady=5)
+        
+        scrollbar = tk.Scrollbar(text_frame)
+        scrollbar.pack(side='right', fill='y')
+        
+        routes_text = tk.Text(text_frame, height=10, font=('Courier', 9), 
+                             yscrollcommand=scrollbar.set, wrap='none')
+        routes_text.pack(side='left', fill='both', expand=True)
+        scrollbar.config(command=routes_text.yview)
+        
+        # Sort routes by time
+        sorted_routes = sorted(all_routes, key=lambda r: r['travel_time'])
+        
+        for i, route in enumerate(sorted_routes):
+            marker = "★ " if route['route_num'] == fastest_route['route_num'] else "  "
+            routes_text.insert('end', f"{marker}Route {route['route_num']}: "
+                                     f"{route['travel_time']:.2f}s - {route['path_description']}\n")
+        
+        routes_text.config(state='disabled')
+        
+        # Close button
+        tk.Button(result_window, text="Close", command=result_window.destroy, 
+                 width=15, height=2).pack(pady=10)
+        
+        print(f"\n✓ Fastest route: {fastest_route['path_description']} "
+              f"({fastest_route['travel_time']:.2f}s)")
+    
     def update_vehicle_positions(self):
         """Update vehicle positions from the queue (runs in main thread)."""
         # Process all position updates from the queue
@@ -1889,6 +2760,20 @@ class GraphPaper(tk.Tk):
     
     def select_junction(self, junction_type):
         """Handle selection of a specific junction type."""
+        # Special handling for Roundabout - show config dialog immediately
+        if junction_type == 'Roundabout':
+            config_dialog = RoundaboutConfigDialog(self)
+            if not config_dialog.result:
+                print("Roundabout selection cancelled")
+                return
+            
+            self.roundabout_exit_count = config_dialog.result['exit_count']
+            self.roundabout_direction = config_dialog.result['direction']
+            print(f"Roundabout configured with {self.roundabout_exit_count} exits, {self.roundabout_direction}")
+        else:
+            self.roundabout_exit_count = None
+            self.roundabout_direction = None
+        
         self.selected_junction_type = junction_type
         self.tool = 'junction'
         self.junction_rotation = 0  # Reset rotation
@@ -1960,8 +2845,13 @@ class GraphPaper(tk.Tk):
         x, y = self.snap(x, y)
         self.junction_preview_pos = (x, y)
         
+        # Get exit_count for roundabouts
+        exit_count = None
+        if self.selected_junction_type == 'Roundabout':
+            exit_count = getattr(self, 'roundabout_exit_count', None)
+        
         # Get template and transform it
-        template_lines = self.get_junction_template(self.selected_junction_type, x, y)
+        template_lines = self.get_junction_template(self.selected_junction_type, x, y, exit_count)
         template_lines = self.transform_template(template_lines, x, y)
         
         # Get current theme for line color
@@ -1987,8 +2877,10 @@ class GraphPaper(tk.Tk):
     
     def on_space_press(self, ev):
         """Handle space bar press to place junction."""
+        print(f"Space pressed - tool: {self.tool}, preview_pos: {self.junction_preview_pos}")
         if self.tool == 'junction' and self.junction_preview_pos:
             x, y = self.junction_preview_pos
+            print(f"Placing junction at {x}, {y}")
             self.place_junction(x, y)
             self.clear_junction_preview()
             # Switch back to pen mode and clear any current drawing
@@ -2017,8 +2909,11 @@ class GraphPaper(tk.Tk):
             if self.junction_preview_pos:
                 self.draw_junction_preview(*self.junction_preview_pos)
     
-    def get_junction_template(self, junction_type, center_x, center_y):
-        """Return the template points for a junction type centered at (center_x, center_y)."""
+    def get_junction_template(self, junction_type, center_x, center_y, exit_count=None):
+        """Return the template points for a junction type centered at (center_x, center_y).
+        
+        For Roundabout: exit_count can be 4 or 8 to determine number of exits.
+        """
         g = self.grid_size
         templates = {
             'T-Section': [
@@ -2044,15 +2939,6 @@ class GraphPaper(tk.Tk):
                 # Top-right diagonal (1 grid unit)
                 [(center_x, center_y), (center_x + g, center_y - g)]
             ],
-            'Roundabout': [
-                # Create an octagon with 2 grid unit radius
-                # Using 8 segments at 45-degree intervals
-                [(center_x + 2*g * math.cos(math.radians(i * 45)), 
-                  center_y + 2*g * math.sin(math.radians(i * 45))),
-                 (center_x + 2*g * math.cos(math.radians((i + 1) * 45)), 
-                  center_y + 2*g * math.sin(math.radians((i + 1) * 45)))]
-                for i in range(8)
-            ],
             'Ramp Merge': [
                 # Main highway (1 grid unit each side)
                 [(center_x - g, center_y), (center_x, center_y)],
@@ -2061,6 +2947,65 @@ class GraphPaper(tk.Tk):
                 [(center_x - g, center_y + g), (center_x, center_y)]
             ]
         }
+        
+        # Special handling for Roundabout with configurable exits
+        if junction_type == 'Roundabout':
+            lines = []
+            
+            # Always draw the octagon roundabout ring (2 grid units radius)
+            octagon_radius = 2 * g
+            octagon_points = []
+            # Start from North (270° in standard math = -90° = up on screen)
+            # Go clockwise: N, NE, E, SE, S, SW, W, NW
+            for i in range(8):
+                angle = math.radians(i * 45 - 90)  # -90° to start from North
+                px = center_x + octagon_radius * math.cos(angle)
+                py = center_y + octagon_radius * math.sin(angle)
+                octagon_points.append((px, py))
+            
+            # Connect octagon points in a loop
+            for i in range(8):
+                p1 = octagon_points[i]
+                p2 = octagon_points[(i + 1) % 8]
+                lines.append([p1, p2])
+            
+            if exit_count == 4:
+                # 4-exit roundabout: N, E, S, W
+                # Exits at octagon vertices 0, 2, 4, 6 (N, E, S, W)
+                exit_indices = [0, 2, 4, 6]  # N, E, S, W
+                for idx in exit_indices:
+                    vertex_point = octagon_points[idx]
+                    # Calculate exit point 1 grid unit further from octagon vertex
+                    angle = math.radians(idx * 45 - 90)
+                    exit_x = center_x + (octagon_radius + g) * math.cos(angle)
+                    exit_y = center_y + (octagon_radius + g) * math.sin(angle)
+                    lines.append([vertex_point, (exit_x, exit_y)])
+                    
+            elif exit_count == 8:
+                # 8-exit roundabout: N, NE, E, SE, S, SW, W, NW (all 8 vertices)
+                for i in range(8):
+                    vertex_point = octagon_points[i]
+                    # Calculate exit point 1 grid unit further from octagon vertex
+                    angle = math.radians(i * 45 - 90)  # Match octagon angle offset
+                    exit_x = center_x + (octagon_radius + g) * math.cos(angle)
+                    exit_y = center_y + (octagon_radius + g) * math.sin(angle)
+                    lines.append([vertex_point, (exit_x, exit_y)])
+            else:
+                # Default to old octagon style if no exit_count specified
+                return [
+                    [(center_x + 2*g * math.cos(math.radians(i * 45)), 
+                      center_y + 2*g * math.sin(math.radians(i * 45))),
+                     (center_x + 2*g * math.cos(math.radians((i + 1) * 45)), 
+                      center_y + 2*g * math.sin(math.radians((i + 1) * 45)))]
+                    for i in range(8)
+                ]
+            
+            return lines
+        
+        if junction_type == 'Landmark':
+            # Landmark has no geometry - just a point marker
+            return []
+        
         return templates.get(junction_type, [])
     
     def get_junction_name(self):
@@ -2083,11 +3028,20 @@ class GraphPaper(tk.Tk):
         if not self.selected_junction_type:
             return
         
+        # For Roundabout, use the stored exit_count from select_junction
+        if self.selected_junction_type == 'Roundabout':
+            exit_count = getattr(self, 'roundabout_exit_count', None)
+            if exit_count is None:
+                print("Roundabout not configured")
+                return
+        else:
+            exit_count = None
+        
         # Snap to grid
         x, y = self.snap(x, y)
         
         # Get template for this junction type and apply transformations
-        template_lines = self.get_junction_template(self.selected_junction_type, x, y)
+        template_lines = self.get_junction_template(self.selected_junction_type, x, y, exit_count)
         template_lines = self.transform_template(template_lines, x, y)
         
         # Get current theme for line color
@@ -2096,25 +3050,30 @@ class GraphPaper(tk.Tk):
         # Generate junction name (A, B, C, ... Z, AA, AB, etc.)
         junction_name = self.get_junction_name()
         
-        # Draw each line in the template as two-way roads
-        for line_points in template_lines:
-            # Convert world coords to screen coords
-            pts_screen = [self.world_to_screen(px, py) for px, py in line_points]
-            cid = self.canvas.create_line(*self.flatten(pts_screen), fill=theme['line'], width=2)
-            
-            # Store as a shape with junction metadata - all junction roads are two-way
-            shape = {
-                'type': 'junction',
-                'junction_type': self.selected_junction_type,
-                'junction_name': junction_name,
-                'points': line_points,
-                'id': cid,
-                'road_config': {
-                    'road_type': 'two_way',
-                    'directions': None  # Two-way roads allow traffic in both directions
+        # For Landmark, we don't draw any lines
+        if self.selected_junction_type == 'Landmark':
+            # Just create the label, no road geometry
+            pass
+        else:
+            # Draw each line in the template as two-way roads
+            for line_points in template_lines:
+                # Convert world coords to screen coords
+                pts_screen = [self.world_to_screen(px, py) for px, py in line_points]
+                cid = self.canvas.create_line(*self.flatten(pts_screen), fill=theme['line'], width=2)
+                
+                # Store as a shape with junction metadata - all junction roads are two-way
+                shape = {
+                    'type': 'junction',
+                    'junction_type': self.selected_junction_type,
+                    'junction_name': junction_name,
+                    'points': line_points,
+                    'id': cid,
+                    'road_config': {
+                        'road_type': 'two_way',
+                        'directions': None  # Two-way roads allow traffic in both directions
+                    }
                 }
-            }
-            self.shapes.append(shape)
+                self.shapes.append(shape)
         
         # Draw junction label at center (scaled)
         sx, sy = self.world_to_screen(x, y)
@@ -2128,17 +3087,25 @@ class GraphPaper(tk.Tk):
         self.junction_labels[junction_name] = {
             'text_id': label_id,
             'position': (x, y),
-            'name': junction_name
+            'name': junction_name,
+            'junction_type': self.selected_junction_type,
+            'roundabout_exit_count': exit_count if self.selected_junction_type == 'Roundabout' else None,
+            'roundabout_direction': getattr(self, 'roundabout_direction', None) if self.selected_junction_type == 'Roundabout' else None
         }
         
         # Install pre-configured traffic lights for this junction
-        self.install_junction_traffic_lights(self.selected_junction_type, x, y, template_lines)
+        self.install_junction_traffic_lights(self.selected_junction_type, x, y, template_lines, exit_count)
         
         print(f"Placed {self.selected_junction_type} at ({x}, {y}) - Junction {junction_name}")
 
-    def install_junction_traffic_lights(self, junction_type, center_x, center_y, template_lines):
+    def install_junction_traffic_lights(self, junction_type, center_x, center_y, template_lines, exit_count=None):
         """Automatically install traffic lights on junction nodes with coordinated timing."""
         import time
+        
+        # Skip traffic lights for Landmark junctions
+        if junction_type == 'Landmark':
+            print(f"Landmark placed at ({center_x}, {center_y}) - no traffic lights installed")
+            return
         
         print(f"Installing traffic lights for {junction_type} at center ({center_x}, {center_y})")
         print(f"Total shapes in system: {len(self.shapes)}")
@@ -2273,6 +3240,202 @@ class GraphPaper(tk.Tk):
             if len(self.traffic_light_states) > 0:
                 # Check if animation is already running by checking if we have a pending after call
                 # For safety, always ensure animation is running
+                if not hasattr(self, '_animation_started'):
+                    self._animation_started = True
+                    self.animate_traffic_lights()
+        
+        elif junction_type == 'Roundabout' and exit_count is not None:
+            # Roundabout with 4 or 8 exits
+            # Opposite exits get green at the same time
+            g = self.grid_size
+            current_time = time.time()
+            octagon_radius = 2 * g  # Octagon has 2-node radius
+            
+            if exit_count == 4:
+                # 4-exit roundabout: 20-second cycle
+                # 0–8s   : N+S Green
+                # 8–10s  : N+S Yellow
+                # 10–18s : E+W Green
+                # 18–20s : E+W Yellow
+                
+                # Traffic lights at end of exit roads (octagon_radius + g from center)
+                exit_distance = octagon_radius + g
+                nodes_config = [
+                    {'pos': (center_x, center_y - exit_distance), 'phase': 'A', 'green': 8, 'yellow': 2, 'offset': 0},   # North (Phase A)
+                    {'pos': (center_x + exit_distance, center_y), 'phase': 'B', 'green': 8, 'yellow': 2, 'offset': 10},  # East (Phase B)
+                    {'pos': (center_x, center_y + exit_distance), 'phase': 'A', 'green': 8, 'yellow': 2, 'offset': 0},   # South (Phase A, same as North)
+                    {'pos': (center_x - exit_distance, center_y), 'phase': 'B', 'green': 8, 'yellow': 2, 'offset': 10}   # West (Phase B, same as East)
+                ]
+                cycle_time = 20
+                
+            elif exit_count == 8:
+                # 8-exit roundabout: 24-second cycle
+                # 0–8s   : N,E,S,W -> GREEN
+                # 8–11s  : N,E,S,W -> YELLOW
+                # 11–12s : ALL RED (buffer)
+                # 12–20s : NE,SE,SW,NW -> GREEN
+                # 20–23s : NE,SE,SW,NW -> YELLOW
+                # 23–24s : ALL RED (buffer)
+                
+                exit_distance = octagon_radius + g
+                
+                # Calculate positions for all 8 exits: N, NE, E, SE, S, SW, W, NW
+                positions = []
+                for idx in range(8):
+                    angle_rad = math.radians(idx * 45 - 90)
+                    pos_x = center_x + exit_distance * math.cos(angle_rad)
+                    pos_y = center_y + exit_distance * math.sin(angle_rad)
+                    positions.append((pos_x, pos_y))
+                
+                # Phase A: Cardinal directions (N, E, S, W) - indices 0, 2, 4, 6
+                # Phase B: Diagonal directions (NE, SE, SW, NW) - indices 1, 3, 5, 7
+                nodes_config = [
+                    {'pos': positions[0], 'phase': 'A', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 0},   # N (Phase A - cardinals)
+                    {'pos': positions[1], 'phase': 'B', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 12},  # NE (Phase B - diagonals)
+                    {'pos': positions[2], 'phase': 'A', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 0},   # E (Phase A - cardinals)
+                    {'pos': positions[3], 'phase': 'B', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 12},  # SE (Phase B - diagonals)
+                    {'pos': positions[4], 'phase': 'A', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 0},   # S (Phase A - cardinals)
+                    {'pos': positions[5], 'phase': 'B', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 12},  # SW (Phase B - diagonals)
+                    {'pos': positions[6], 'phase': 'A', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 0},   # W (Phase A - cardinals)
+                    {'pos': positions[7], 'phase': 'B', 'green': 8, 'yellow': 3, 'red_buffer': 1, 'offset': 12}   # NW (Phase B - diagonals)
+                ]
+                cycle_time = 24
+            
+            # Install traffic lights for each exit
+            for node_config in nodes_config:
+                pos = node_config['pos']
+                phase = node_config['phase']
+                green_time = node_config['green']
+                yellow_time = node_config['yellow']
+                offset = node_config['offset']
+                red_buffer = node_config.get('red_buffer', 0)  # Optional red buffer time
+                
+                # Calculate red time (includes buffer if specified)
+                red_time = cycle_time - green_time - yellow_time
+                
+                timing = {
+                    'green': green_time,
+                    'yellow': yellow_time,
+                    'red': red_time,
+                    'red_buffer': red_buffer
+                }
+                
+                # Calculate the road direction vector (from center to exit)
+                road_dx = pos[0] - center_x
+                road_dy = pos[1] - center_y
+                road_length = math.sqrt(road_dx * road_dx + road_dy * road_dy)
+                
+                # Normalize road direction
+                if road_length > 0:
+                    road_dx /= road_length
+                    road_dy /= road_length
+                else:
+                    road_dx, road_dy = 0, 1
+                
+                # Calculate perpendicular direction (rotate 90 degrees)
+                # Perpendicular to (dx, dy) is (-dy, dx)
+                perp_dx = -road_dy
+                perp_dy = road_dx
+                
+                # Scale to desired offset distance
+                offset_distance = 15
+                perpendicular_offset_x = perp_dx * offset_distance
+                perpendicular_offset_y = perp_dy * offset_distance
+                
+                # Find the shape that contains this node
+                nearest_shape = None
+                for shape in self.shapes:
+                    if shape.get('junction_type') == junction_type:
+                        for px, py in shape['points']:
+                            # Check with small tolerance for floating point
+                            if abs(px - pos[0]) < 0.1 and abs(py - pos[1]) < 0.1:
+                                nearest_shape = shape
+                                break
+                    if nearest_shape:
+                        break
+                
+                if not nearest_shape:
+                    continue
+                
+                # Create marker key
+                marker_key = (nearest_shape.get('id'), pos)
+                if marker_key not in self.node_markers:
+                    self.node_markers[marker_key] = {}
+                
+                # Determine initial state based on offset
+                elapsed = (current_time % cycle_time)
+                time_in_phase = elapsed - offset
+                if time_in_phase < 0:
+                    time_in_phase += cycle_time
+                
+                if time_in_phase < green_time:
+                    initial_color = 'green'
+                    state_index = 0
+                elif time_in_phase < green_time + yellow_time:
+                    initial_color = 'yellow'
+                    state_index = 1
+                else:
+                    initial_color = 'red'
+                    state_index = 2
+                
+                # Add two traffic lights (one on each side)
+                for light_num in range(2):
+                    offset_x = perpendicular_offset_x if light_num == 0 else -perpendicular_offset_x
+                    offset_y = perpendicular_offset_y if light_num == 0 else -perpendicular_offset_y
+                    
+                    # Draw traffic light (scaled)
+                    sx, sy = self.world_to_screen(*pos)
+                    sx += offset_x * self.scale
+                    sy += offset_y * self.scale
+                    
+                    # Scale the sizes
+                    outer_radius = 10 * self.scale
+                    inner_radius = 8 * self.scale
+                    border_width = max(1, int(2 * self.scale))
+                    
+                    # Draw border
+                    border_id = self.canvas.create_oval(sx - outer_radius, sy - outer_radius, 
+                                                       sx + outer_radius, sy + outer_radius, 
+                                                       fill='black', outline='black', width=border_width, tags='marker')
+                    
+                    # Draw inner light
+                    light_id = self.canvas.create_oval(sx - inner_radius, sy - inner_radius, 
+                                                      sx + inner_radius, sy + inner_radius, 
+                                                      fill=initial_color, outline='', tags='marker')
+                    
+                    # Generate unique ID
+                    light_unique_id = self.traffic_light_next_id
+                    self.traffic_light_next_id += 1
+                    
+                    # Store marker info
+                    light_key = f'traffic_light_{light_num}'
+                    self.node_markers[marker_key][light_key] = {
+                        'border_id': border_id,
+                        'light_id': light_id,
+                        'world_pos': pos,
+                        'current_color': initial_color,
+                        'perpendicular_offset': (offset_x, offset_y),
+                        'unique_id': light_unique_id
+                    }
+                    
+                    # Initialize traffic light state
+                    self.traffic_light_states[light_unique_id] = {
+                        'state': initial_color,
+                        'state_index': state_index,
+                        'timing': timing,
+                        'marker_key': marker_key,
+                        'light_key': light_key,
+                        'last_change': current_time - time_in_phase,  # Adjust for phase offset
+                        'phase': phase,
+                        'junction_type': junction_type,
+                        'cycle_time': cycle_time,
+                        'phase_offset': offset
+                    }
+            
+            print(f"Installed {exit_count}-exit roundabout with {cycle_time}s cycle at {junction_type}")
+            
+            # Start animation
+            if len(self.traffic_light_states) > 0:
                 if not hasattr(self, '_animation_started'):
                     self._animation_started = True
                     self.animate_traffic_lights()
@@ -2670,6 +3833,8 @@ if __name__ == '__main__':
                 app.destroy()
             except:
                 pass
+            # Force exit the Python process
+            sys.exit(0)
     
     app.protocol("WM_DELETE_WINDOW", on_closing)
     
